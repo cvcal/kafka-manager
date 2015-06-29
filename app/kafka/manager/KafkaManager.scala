@@ -23,8 +23,13 @@ import scala.util.{Success, Failure, Try}
 /**
  * @author hiral
  */
-case class TopicListExtended(list: IndexedSeq[(String, Option[TopicIdentity])], deleteSet: Set[String], underReassignments: IndexedSeq[String])
-case class BrokerListExtended(list: IndexedSeq[BrokerIdentity], metrics: Map[Int,BrokerMetrics], combinedMetric: Option[BrokerMetrics], clusterConfig: ClusterConfig)
+case class TopicListExtended(list: IndexedSeq[(String, Option[TopicIdentity])],
+                             deleteSet: Set[String],
+                             underReassignments: IndexedSeq[String])
+case class BrokerListExtended(list: IndexedSeq[BrokerIdentity],
+                              metrics: Map[Int,BrokerMetrics],
+                              combinedMetric: Option[BrokerMetrics],
+                              clusterConfig: ClusterConfig)
 case class ApiError(msg: String)
 object ApiError {
   private[this] val log : Logger = LoggerFactory.getLogger(classOf[ApiError])

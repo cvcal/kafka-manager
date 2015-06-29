@@ -161,11 +161,20 @@ object ActorModel {
     }
   }
 
-  case class TopicPartitionIdentity(partNum: Int, leader:Int, isr: Seq[Int], replicas: Seq[Int], isPreferredLeader: Boolean = false, isUnderReplicated: Boolean = false)
+  case class TopicPartitionIdentity(partNum: Int,
+                                    leader:Int,
+                                    logSize:Int,
+                                    isr: Seq[Int],
+                                    replicas: Seq[Int],
+                                    isPreferredLeader: Boolean = false,
+                                    isUnderReplicated: Boolean = false)
   object TopicPartitionIdentity {
     
     lazy val logger = LoggerFactory.getLogger(this.getClass)
-    
+
+    //TODO: temporary hack to display an empty log size before the kafka call is added
+    val logsize = 0
+
     import scalaz.syntax.applicative._
     import org.json4s.jackson.JsonMethods._
     import org.json4s.scalaz.JsonScalaz._
@@ -180,14 +189,14 @@ object ActorModel {
           (leader: Int, isr: Seq[Int]) => leader -> isr
         }
       }
-      val default = TopicPartitionIdentity(partition,-2,Seq.empty,replicas)
+      val default = TopicPartitionIdentity(partition,-2,-1,Seq.empty,replicas)
       leaderAndIsr.fold(default) { parsedLeaderAndIsrOrError =>
         parsedLeaderAndIsrOrError.fold({ e =>
           logger.error(s"Failed to parse topic state $e")
           default
         }, {
           case (leader, isr) =>
-            TopicPartitionIdentity(partition, leader, isr, replicas, leader == replicas.head, isr.size != replicas.size)
+            TopicPartitionIdentity(partition, leader, logsize, isr, replicas, leader == replicas.head, isr.size != replicas.size)
         })
       }
     }
@@ -222,6 +231,7 @@ object ActorModel {
       }.toIndexedSeq.sortBy(_.id)
     }
 
+    val logSize : Int = partitionsIdentity.toList.map(_._2.logSize).sum
 
     val preferredReplicasPercentage : Int = (100 * partitionsIdentity.count(_._2.isPreferredLeader)) / partitions
 
@@ -261,7 +271,7 @@ object ActorModel {
       val stateMap = td.partitionState.getOrElse(Map.empty)
       val tpi : Map[Int,TopicPartitionIdentity] = partMap.map { case (part, replicas) =>
         (part.toInt,TopicPartitionIdentity.from(part.toInt,stateMap.get(part),replicas))
-      }.toMap
+      }
       val config : (Int,Map[String, String]) = {
         try {
           val resultOption: Option[(Int,Map[String, String])] = td.config.map { configString =>

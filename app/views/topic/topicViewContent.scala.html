@@ -88,6 +88,10 @@
                         <td>@topicIdentity.partitions</td>
                     </tr>
                     <tr>
+                        <td>Total log size</td>
+                        <td>@topicIdentity.logSize</td>
+                    </tr>
+                    <tr>
                         <td>Total number of Brokers</td>
                         <td>@topicIdentity.numBrokers</td>
                     </tr>
@@ -193,7 +197,7 @@
                     <tr>
                         <td><a href="@routes.Application.broker(cluster,btp.id)">@btp.id</a></td>
                         <td>@btp.partitions.size</td>
-                        <td>@btp.partitions.mkString("(",",",")")</td>
+                        <td>@btp.partitions.mkString("(", ", ", ")")</td>
                         <td class="@getBrokerIsSkewedLevel(btp.isSkewed)">
                             @btp.isSkewed
                         </td>
@@ -210,17 +214,18 @@
                 <div class="panel-heading"><h4>Partition Information</h4></div>
                 <table class="table">
                     <thead>
-                    <tr><th>Partition</th><th>Leader</th><th>Replicas</th><th>In Sync Replicas</th><th>Preferred Leader?</th><th>Under Replicated?</th></tr>
+                    <tr><th>Partition</th><th>Logsize</th><th>Leader</th><th>Replicas</th><th>In Sync Replicas</th><th>Preferred Leader?</th><th>Under Replicated?</th></tr>
                     </thead>
                     <tbody>
                     @for((_,tpi) <- topicIdentity.partitionsIdentity.toIndexedSeq.sortBy(_._2.partNum)) {
                     <tr>
                         <td>@tpi.partNum</td>
+                        <td>@tpi.logSize</td>
                         <td class="@getPartitionLeaderLevel(tpi.leader)">
                             <a href="@routes.Application.broker(cluster,tpi.leader)">@tpi.leader</a>
                         </td>
-                        <td>@tpi.replicas.mkString("(",",",")")</td>
-                        <td>@tpi.isr.mkString("(",",",")")</td>
+                        <td>@tpi.replicas.mkString("(", ", ", ")")</td>
+                        <td>@tpi.isr.mkString("(", ", ", ")")</td>
                         <td class="@getIsPreferredLeaderLevel(tpi.isPreferredLeader)">
                             @tpi.isPreferredLeader
                         </td>
