@@ -51,7 +51,7 @@
                     <td>@ti.replicationFactor</td>
                     <td>@ti.partitions</td>
                     <td>@bp.size</td>
-                    <td>@bp.mkString("(",",",")")</td>
+                    <td>@bp.mkString("(", ", ", ")")</td>
                     <td>@ti.partitionsByBroker.find(_.id == brokerId).map(_.isSkewed).getOrElse("Unknown")</td>
                 </tr>
                 }
