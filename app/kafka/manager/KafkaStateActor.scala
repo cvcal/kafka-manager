@@ -174,8 +174,9 @@ class KafkaStateActor(curator: CuratorFramework,
         val statePath = s"$partitionsPath/$part/state"
         Option(topicsTreeCache.getCurrentData(statePath)).map(cd => (part, asString(cd.getData)))
       }
+      partitionOffsets = getPartitionOffsets(states)
       config = getTopicConfigString(topic)
-    } yield TopicDescription(topic, description, Option(states),config, deleteSupported)
+    } yield TopicDescription(topic, description, Option(states), partitionOffsets, config, deleteSupported)
   }
 
   override def processActorResponse(response: ActorResponse): Unit = {
@@ -188,6 +189,12 @@ class KafkaStateActor(curator: CuratorFramework,
     val data: mutable.Buffer[ChildData] = topicsConfigPathCache.getCurrentData.asScala
     val result: Option[ChildData] = data.find(p => p.getPath.endsWith(topic))
     result.map(cd => (cd.getStat.getVersion,asString(cd.getData)))
+  }
+
+  // Get the latest offsets for the partitions described in the states map
+  private def getPartitionOffsets(states: Map[String, String]) : Option[Seq[Long]] = {
+    //TODO - add call to kafka
+    None
   }
 
   override def processQueryRequest(request: QueryRequest): Unit = {

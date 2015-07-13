@@ -78,8 +78,8 @@ object ActorModel {
                            config: Properties) extends CommandRequest
   case class KCAddTopicPartitions(topic: String,
                            brokers: Seq[Int],
-                           partitions: Int, 
-                           partitionReplicaList: Map[Int, Seq[Int]], 
+                           partitions: Int,
+                           partitionReplicaList: Map[Int, Seq[Int]],
                            readVersion: Int) extends CommandRequest
   case class KCUpdateTopicConfig(topic: String, config: Properties, readVersion: Int) extends CommandRequest
   case class KCDeleteTopic(topic: String) extends CommandRequest
@@ -131,15 +131,20 @@ object ActorModel {
 
   case class TopicDescription(topic: String,
                               description: (Int,String),
-                              partitionState: Option[Map[String, String]], 
+                              partitionState: Option[Map[String, String]],
+                              partitionOffsets : Option[Seq[Long]],
                               config:Option[(Int,String)],
                               deleteSupported: Boolean) extends  QueryResponse
   case class TopicDescriptions(descriptions: IndexedSeq[TopicDescription], lastUpdateMillis: Long) extends QueryResponse
 
   case class BrokerList(list: IndexedSeq[BrokerIdentity], clusterConfig: ClusterConfig) extends QueryResponse
 
-  case class PreferredReplicaElection(startTime: DateTime, topicAndPartition: Set[TopicAndPartition], endTime: Option[DateTime]) extends QueryResponse
-  case class ReassignPartitions(startTime: DateTime, partitionsToBeReassigned: Map[TopicAndPartition, Seq[Int]], endTime: Option[DateTime]) extends QueryResponse
+  case class PreferredReplicaElection(startTime: DateTime,
+                                      topicAndPartition: Set[TopicAndPartition],
+                                      endTime: Option[DateTime]) extends QueryResponse
+  case class ReassignPartitions(startTime: DateTime,
+                                partitionsToBeReassigned: Map[TopicAndPartition, Seq[Int]],
+                                endTime: Option[DateTime]) extends QueryResponse
 
   case object DCUpdateState extends CommandRequest
 
@@ -163,24 +168,24 @@ object ActorModel {
 
   case class TopicPartitionIdentity(partNum: Int,
                                     leader:Int,
-                                    logSize:Int,
+                                    latestOffset:Long,
                                     isr: Seq[Int],
                                     replicas: Seq[Int],
                                     isPreferredLeader: Boolean = false,
                                     isUnderReplicated: Boolean = false)
   object TopicPartitionIdentity {
-    
-    lazy val logger = LoggerFactory.getLogger(this.getClass)
 
-    //TODO: temporary hack to display an empty log size before the kafka call is added
-    val logsize = 0
+    lazy val logger = LoggerFactory.getLogger(this.getClass)
 
     import scalaz.syntax.applicative._
     import org.json4s.jackson.JsonMethods._
     import org.json4s.scalaz.JsonScalaz._
     import scala.language.reflectiveCalls
 
-    implicit def from(partition: Int, state:Option[String], replicas: Seq[Int]) : TopicPartitionIdentity = {
+    implicit def from(partition: Int,
+                      state:Option[String],
+                      offset : Long,
+                      replicas: Seq[Int]) : TopicPartitionIdentity = {
       val leaderAndIsr = for {
         json <- state
         parsedJson = parse(json)
@@ -196,7 +201,7 @@ object ActorModel {
           default
         }, {
           case (leader, isr) =>
-            TopicPartitionIdentity(partition, leader, logsize, isr, replicas, leader == replicas.head, isr.size != replicas.size)
+            TopicPartitionIdentity(partition, leader, offset, isr, replicas, leader == replicas.head, isr.size != replicas.size)
         })
       }
     }
@@ -211,7 +216,7 @@ object ActorModel {
                            numBrokers: Int,
                            configReadVersion: Int,
                            config: List[(String,String)],
-                           deleteSupported: Boolean, 
+                           deleteSupported: Boolean,
                            clusterConfig: ClusterConfig,
                            metrics: Option[BrokerMetrics] = None) {
 
@@ -226,12 +231,13 @@ object ActorModel {
 
       brokerPartitionsMap.map {
         case (brokerId, brokerPartitions)=>
-          BrokerTopicPartitions(brokerId, brokerPartitions.toIndexedSeq,
+          BrokerTopicPartitions(brokerId, brokerPartitions.toIndexedSeq.sorted,
             brokerPartitions.size > avgPartitionsPerBroker)
       }.toIndexedSeq.sortBy(_.id)
     }
 
-    val logSize : Int = partitionsIdentity.toList.map(_._2.logSize).sum
+    // a topic's log-size is the sum of its partitions' log-sizes
+    val logSize : Long = partitionsIdentity.map(_._2.latestOffset).sum
 
     val preferredReplicasPercentage : Int = (100 * partitionsIdentity.count(_._2.isPreferredLeader)) / partitions
 
@@ -260,17 +266,27 @@ object ActorModel {
     import org.json4s.jackson.JsonMethods._
     import org.json4s.scalaz.JsonScalaz._
     import scala.language.reflectiveCalls
-    
-    implicit def from(brokers: Int,td: TopicDescription, tm: Option[BrokerMetrics], clusterConfig: ClusterConfig) : TopicIdentity = {
+
+    implicit def from(brokers: Int,
+                      td: TopicDescription,
+                      tm: Option[BrokerMetrics],
+                      clusterConfig: ClusterConfig) : TopicIdentity = {
+      // Get the topic description information
       val descJson = parse(td.description._2)
-      //val partMap = (descJson \ "partitions").as[Map[String,Seq[Int]]]
       val partMap = field[Map[String,List[Int]]]("partitions")(descJson).fold({ e =>
         logger.error(s"[topic=${td.topic}] Failed to get partitions from topic json ${td.description._2}")
         Map.empty
       }, identity)
       val stateMap = td.partitionState.getOrElse(Map.empty)
-      val tpi : Map[Int,TopicPartitionIdentity] = partMap.map { case (part, replicas) =>
-        (part.toInt,TopicPartitionIdentity.from(part.toInt,stateMap.get(part),replicas))
+
+      // Assign it to the TPI format
+      val tpi : Map[Int,TopicPartitionIdentity] = partMap.map { case (partition, replicas) =>
+        (partition.toInt,TopicPartitionIdentity.from(partition.toInt,
+                                                     stateMap.get(partition),
+                                                     td.partitionOffsets match {
+                                                       case Some(set) => set(partition.toInt)
+                                                       case None => 0},
+                                                     replicas))
       }
       val config : (Int,Map[String, String]) = {
         try {
@@ -289,7 +305,7 @@ object ActorModel {
             (-1,Map.empty[String, String])
         }
       }
-      TopicIdentity(td.topic,td.description._1,partMap.size,tpi,brokers,config._1,config._2.toList,td.deleteSupported, clusterConfig, tm)
+      TopicIdentity(td.topic, td.description._1, partMap.size, tpi, brokers,config._1,config._2.toList,td.deleteSupported, clusterConfig, tm)
     }
 
     implicit def from(bl: BrokerList,td: TopicDescription, tm: Option[BrokerMetrics], clusterConfig: ClusterConfig) : TopicIdentity = {
@@ -303,7 +319,8 @@ object ActorModel {
           val newReplicaSeq = assignedReplicas.get(part)
           require(newReplicaSeq.isDefined, s"Missing replica assignment for partition $part for topic ${currentTopicIdentity.topic}")
           val newReplicaSet = newReplicaSeq.get.toSet
-          require(newReplicaSeq.get.size == newReplicaSet.size, s"Duplicates found in replica set ${newReplicaSeq.get} for partition $part for topic ${currentTopicIdentity.topic}")
+          require(newReplicaSeq.get.size == newReplicaSet.size,
+            s"Duplicates found in replica set ${newReplicaSeq.get} for partition $part for topic ${currentTopicIdentity.topic}")
           (part,tpi.copy(replicas = newReplicaSeq.get))
         }
         TopicIdentity(
@@ -351,6 +368,6 @@ object ActorModel {
       MeterMetric(0, 0, 0, 0, 0),
       OSMetric(0D, 0D))
   }
-  
+
   case class BrokerClusterStats(perMessages: BigDecimal, perIncoming: BigDecimal, perOutgoing: BigDecimal)
 }
