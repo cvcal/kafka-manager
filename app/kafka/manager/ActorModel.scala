@@ -132,7 +132,7 @@ object ActorModel {
   case class TopicDescription(topic: String,
                               description: (Int,String),
                               partitionState: Option[Map[String, String]],
-                              partitionOffsets : Option[Seq[Long]],
+                              partitionOffsets : Option[Map[Int, Option[Long]]],
                               config:Option[(Int,String)],
                               deleteSupported: Boolean) extends  QueryResponse
   case class TopicDescriptions(descriptions: IndexedSeq[TopicDescription], lastUpdateMillis: Long) extends QueryResponse
@@ -167,8 +167,8 @@ object ActorModel {
   }
 
   case class TopicPartitionIdentity(partNum: Int,
-                                    leader:Int,
-                                    latestOffset:Long,
+                                    leader: Int,
+                                    latestOffset: Option[Long],
                                     isr: Seq[Int],
                                     replicas: Seq[Int],
                                     isPreferredLeader: Boolean = false,
@@ -184,7 +184,7 @@ object ActorModel {
 
     implicit def from(partition: Int,
                       state:Option[String],
-                      offset : Long,
+                      offset: Option[Long],
                       replicas: Seq[Int]) : TopicPartitionIdentity = {
       val leaderAndIsr = for {
         json <- state
@@ -194,7 +194,7 @@ object ActorModel {
           (leader: Int, isr: Seq[Int]) => leader -> isr
         }
       }
-      val default = TopicPartitionIdentity(partition,-2,-1,Seq.empty,replicas)
+      val default = TopicPartitionIdentity(partition,-2,None,Seq.empty,replicas)
       leaderAndIsr.fold(default) { parsedLeaderAndIsrOrError =>
         parsedLeaderAndIsrOrError.fold({ e =>
           logger.error(s"Failed to parse topic state $e")
@@ -237,7 +237,7 @@ object ActorModel {
     }
 
     // a topic's log-size is the sum of its partitions' log-sizes
-    val logSize : Long = partitionsIdentity.map(_._2.latestOffset).sum
+    val logSize : Long = partitionsIdentity.flatMap(_._2.latestOffset).sum
 
     val preferredReplicasPercentage : Int = (100 * partitionsIdentity.count(_._2.isPreferredLeader)) / partitions
 
@@ -284,8 +284,9 @@ object ActorModel {
         (partition.toInt,TopicPartitionIdentity.from(partition.toInt,
                                                      stateMap.get(partition),
                                                      td.partitionOffsets match {
-                                                       case Some(set) => set(partition.toInt)
-                                                       case None => 0},
+                                                       case Some(set) => set.getOrElse(partition.toInt, None)
+                                                       case None => None
+                                                     },
                                                      replicas))
       }
       val config : (Int,Map[String, String]) = {
