@@ -8,7 +8,7 @@ package kafka.manager
 import java.util.Properties
 
 import org.joda.time.DateTime
-import kafka.manager.utils.TopicAndPartition
+import kafka.common.TopicAndPartition
 import org.slf4j.LoggerFactory
 
 import scala.util.Try

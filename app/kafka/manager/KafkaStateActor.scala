@@ -5,12 +5,13 @@
 
 package kafka.manager
 
+import kafka.common.TopicAndPartition
 import kafka.manager.utils.zero81.{ReassignPartitionCommand, PreferredReplicaLeaderElectionCommand}
 import org.apache.curator.framework.recipes.cache.PathChildrenCache.StartMode
 import org.apache.curator.framework.recipes.cache._
 import org.apache.curator.framework.CuratorFramework
 import org.joda.time.{DateTimeZone, DateTime}
-import kafka.manager.utils.{TopicAndPartition, ZkUtils}
+import kafka.manager.utils.ZkUtils
 
 import scala.collection.mutable
 import scala.util.{Success, Failure, Try}
@@ -191,10 +192,26 @@ class KafkaStateActor(curator: CuratorFramework,
     result.map(cd => (cd.getStat.getVersion,asString(cd.getData)))
   }
 
-  // Get the latest offsets for the partitions described in the states map
+  // Get the latest offsets for the partitions described in the states map, based off of the GetOffsetShell tool
   private def getPartitionOffsets(states: Map[String, String]) : Option[Seq[Long]] = {
     //TODO - add call to kafka
     None
+  }
+
+  private[this] def getBrokers() : IndexedSeq[BrokerIdentity] = {
+    val data: mutable.Buffer[ChildData] = brokersPathCache.getCurrentData.asScala
+    data.map { cd =>
+      BrokerIdentity.from(nodeFromPath(cd.getPath).toInt, asString(cd.getData))
+    }.filter { v =>
+      v match {
+        case scalaz.Failure(nel) =>
+          log.error(s"Failed to parse broker config $nel")
+          false
+        case _ => true
+      }
+    }.collect {
+      case scalaz.Success(bi) => bi
+    }.toIndexedSeq.sortBy(_.id)
   }
 
   override def processQueryRequest(request: QueryRequest): Unit = {
@@ -244,20 +261,7 @@ class KafkaStateActor(curator: CuratorFramework,
         sender ! topicsTreeCacheLastUpdateMillis
 
       case KSGetBrokers =>
-        val data: mutable.Buffer[ChildData] = brokersPathCache.getCurrentData.asScala
-        val result: IndexedSeq[BrokerIdentity] = data.map { cd =>
-          BrokerIdentity.from(nodeFromPath(cd.getPath).toInt, asString(cd.getData))
-        }.filter { v =>
-          v match {
-            case scalaz.Failure(nel) =>
-              log.error(s"Failed to parse broker config $nel")
-              false
-            case _ => true
-          }
-        }.collect { 
-          case scalaz.Success(bi) => bi
-        }.toIndexedSeq.sortBy(_.id)
-        sender ! BrokerList(result, clusterConfig)
+        sender ! BrokerList(getBrokers(), clusterConfig)
 
       case KSGetPreferredLeaderElection =>
         sender ! preferredLeaderElection
