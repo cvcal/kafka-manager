@@ -47,7 +47,7 @@ class TestReassignPartitions extends CuratorAwareTest {
       val json : String = curator.getData.storingStatIn(stat).forPath(ZkUtils.getTopicPath(topic))
       val configStat = new Stat
       val configJson : String = curator.getData.storingStatIn(configStat).forPath(ZkUtils.getTopicConfigPath(topic))
-      val td: TopicDescription = TopicDescription(topic,(stat.getVersion,json),None,Option((configStat.getVersion,configJson)),false)
+      val td: TopicDescription = TopicDescription(topic,(stat.getVersion,json),None,None,Option((configStat.getVersion,configJson)),false)
       TopicIdentity.from(brokerList.size,td,None, defaultClusterConfig)
     }
   }
