@@ -132,10 +132,21 @@ object ActorModel {
   case class TopicDescription(topic: String,
                               description: (Int,String),
                               partitionState: Option[Map[String, String]],
-                              partitionOffsets : Option[Map[Int, Option[Long]]],
+                              partitionOffsets: Option[Map[Int, Option[Long]]],
                               config:Option[(Int,String)],
                               deleteSupported: Boolean) extends  QueryResponse
   case class TopicDescriptions(descriptions: IndexedSeq[TopicDescription], lastUpdateMillis: Long) extends QueryResponse
+
+  case class ConsumedTopicDescription(topic: String,
+                                      consumer: String,
+                                      partitionOwners: Option[Map[Int, String]],
+                                      partitionOffsets: Option[Map[Int, Int]])
+  case class ConsumerDescription(consumer: String,
+                                 description: (Int,String),
+                                 topics: Map[String, ConsumedTopicDescription],
+                                 config:Option[(Int,String)]) extends  QueryResponse
+
+  case class ConsumerDescriptions(descriptions: IndexedSeq[ConsumerDescription], lastUpdateMillis: Long) extends QueryResponse
 
   case class BrokerList(list: IndexedSeq[BrokerIdentity], clusterConfig: ClusterConfig) extends QueryResponse
 
@@ -336,6 +347,78 @@ object ActorModel {
           currentTopicIdentity.clusterConfig,
           currentTopicIdentity.metrics)
       }
+    }
+  }
+
+  case class ConsumerTopicState(consumerGroup: String,
+                                topic: String,
+                                topicId: Option[TopicIdentity],
+                                partitionOwners: IndexedSeq[(Int, Option[String])],
+                                partitionOffsets: IndexedSeq[(Int, Int)])
+
+  case class ConsumerIdentity(consumerGroup:String,
+                              topicList: Seq[(String, ConsumerTopicState)],
+                              numBrokers: Int,
+                              configReadVersion: Int,
+                              config: List[(String,String)],
+                              clusterConfig: ClusterConfig,
+                              metrics: Option[BrokerMetrics] = None) 
+  object ConsumerIdentity {
+
+    lazy val logger = LoggerFactory.getLogger(this.getClass)
+
+    import org.json4s.jackson.JsonMethods._
+    import org.json4s.scalaz.JsonScalaz._
+    import scala.language.reflectiveCalls
+
+    def getConsumerTopicState(ctd: ConsumedTopicDescription): ConsumerTopicState = {
+      val partitionOffsetsMap = ctd.partitionOffsets.getOrElse(Map.empty)
+      val partNum = partitionOffsetsMap.size
+      // TODO : How to link this to a topicIdentity
+      val partitionOwners : IndexedSeq[(Int, Option[String])] = for {
+        i <- 0 until partNum
+        owner = ctd.partitionOwners.getOrElse(Map.empty).get(i)
+      } yield (i, owner)
+      ConsumerTopicState(ctd.consumer, ctd.topic, None, partitionOwners, partitionOffsetsMap.toIndexedSeq.sortBy(_._1))
+    }
+
+    implicit def from(brokers: Int,
+                      cd: ConsumerDescription,
+                      tm: Option[BrokerMetrics],
+                      clusterConfig: ClusterConfig) : ConsumerIdentity = {
+      // TODO : keeping the cluster config info for now
+      val config : (Int,Map[String, String]) = {
+        try {
+          val resultOption: Option[(Int,Map[String, String])] = cd.config.map { configString =>
+            val configJson = parse(configString._2)
+            val configMap : Map[String, String] = field[Map[String,String]]("config")(configJson).fold({ e =>
+              logger.error(s"Failed to parse topic config ${configString._2}")
+              Map.empty
+            }, identity)
+            (configString._1,configMap)
+          }
+          resultOption.getOrElse((-1,Map.empty[String, String]))
+        } catch {
+          case e: Exception =>
+            logger.error(s"[consumer=${cd.consumer}] Failed to parse consumer config : ${cd.config.getOrElse("")}",e)
+            (-1,Map.empty[String, String])
+        }
+      }
+      val topicMap: Seq[(String, ConsumerTopicState)] = for {
+        (topic, ctd) <- cd.topics.toSeq
+        cts = getConsumerTopicState(ctd)
+      } yield (topic, cts)
+      ConsumerIdentity(cd.consumer,
+                       topicMap.sortBy(_._1),
+                       brokers,
+                       config._1,
+                       config._2.toList,
+                       clusterConfig,
+                       tm)
+    }
+
+    implicit def from(bl: BrokerList,cd: ConsumerDescription, tm: Option[BrokerMetrics], clusterConfig: ClusterConfig) : ConsumerIdentity = {
+      from(bl.list.size, cd, tm, clusterConfig)
     }
   }
 

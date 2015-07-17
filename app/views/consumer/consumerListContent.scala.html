@@ -1,0 +1,22 @@
+@*
+* Copyright 2015 Yahoo Inc. Licensed under the Apache License, Version 2.0
+* See accompanying LICENSE file.
+*@
+@(cluster: String, consumers: IndexedSeq[(String,kafka.manager.ActorModel.ConsumerIdentity)])
+
+
+<table class="table" id="consumer-table">
+    <thead>
+    <tr><th>Consumer</th>
+        <th>Topics it consumes from</th>
+    </tr>
+    </thead>
+    <tbody>
+    @for( (consumer, consumerIdentity) <- consumers; topicState <- consumerIdentity.topicList; topic = topicState._1) {
+        <tr>
+            <td><a href="@routes.Consumer.consumer(cluster,consumer)">@consumer</a></td>
+            <td><a href="@routes.Consumer.consumerAndTopic(cluster,consumer,topic)">@topic</a></td>
+        </tr>
+    }
+    </tbody>
+</table>

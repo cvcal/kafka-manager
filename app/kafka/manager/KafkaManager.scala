@@ -26,10 +26,12 @@ import scala.util.{Success, Failure, Try}
 case class TopicListExtended(list: IndexedSeq[(String, Option[TopicIdentity])],
                              deleteSet: Set[String],
                              underReassignments: IndexedSeq[String])
+case class ConsumerListExtended(list: IndexedSeq[(String, ConsumerIdentity)])
 case class BrokerListExtended(list: IndexedSeq[BrokerIdentity],
                               metrics: Map[Int,BrokerMetrics],
                               combinedMetric: Option[BrokerMetrics],
                               clusterConfig: ClusterConfig)
+
 case class ApiError(msg: String)
 object ApiError {
   private[this] val log : Logger = LoggerFactory.getLogger(classOf[ApiError])
@@ -400,6 +402,20 @@ class KafkaManager(akkaConfig: Config)
     }
   }
 
+  def getConsumerListExtended(clusterName: String): Future[ApiError \/ ConsumerListExtended] = {
+    // TODO: Not implemented
+    implicit val ec = apiExecutionContext
+    Future(\/-(ConsumerListExtended(IndexedSeq(
+      ("test-consumer",
+       ConsumerIdentity("test-consumer",
+                        Seq("atopic" -> ConsumerTopicState("test-consumer", "atopic", None, IndexedSeq((0 -> None), (1 -> Some("test-consumer-0"))), IndexedSeq((0 -> 1), (1-> 2))),
+                            "another" -> ConsumerTopicState("test-consumer", "another", None, IndexedSeq((0 -> Some("test-consumer-1"))), IndexedSeq((0 -> 25)))),
+                        0,
+                        0,
+                        List.empty,
+                        ClusterConfig("", CuratorConfig(""), false, Kafka_0_8_2_1, false)))))))
+  }
+
   def getTopicsUnderReassignment(clusterName: String): Future[ApiError \/ IndexedSeq[String]] = {
     val futureReassignments = getReassignPartitions(clusterName)
     implicit val ec = apiExecutionContext
@@ -499,7 +515,20 @@ class KafkaManager(akkaConfig: Config)
     }
   }
 
-  def getTopicMetrics(clusterName: String, topic: String): Future[ApiError \/ Option[BrokerMetrics]] = {
+  def getConsumerIdentity(clusterName: String, consumer: String): Future[ApiError \/ ConsumerIdentity] = {
+    implicit val ec = apiExecutionContext
+    // TODO: Not implemented
+    Future(\/-(ConsumerIdentity("", List.empty, 0, 0, List.empty,
+                                ClusterConfig("",
+                                              CuratorConfig(""),
+                                              false,
+                                              Kafka_0_8_2_1,
+                                              false), None)))
+  }
+
+
+
+    def getTopicMetrics(clusterName: String, topic: String): Future[ApiError \/ Option[BrokerMetrics]] = {
     tryWithKafkaManagerActor(
       KMClusterQueryRequest(
         clusterName,
