@@ -33,6 +33,7 @@ object ActorModel {
 
   case object BVForceUpdate extends CommandRequest
   case object BVGetTopicIdentities extends BVRequest
+  case object BVGetConsumerIdentities extends BVRequest
   case class BVGetView(id: Int) extends BVRequest
   case object BVGetViews extends BVRequest
   case class BVGetTopicMetrics(topic: String) extends BVRequest
@@ -48,8 +49,10 @@ object ActorModel {
 
   case object CMGetView extends QueryRequest
   case class CMGetTopicIdentity(topic: String) extends QueryRequest
+  case class CMGetConsumerIdentity(consumer: String) extends QueryRequest
   case class CMView(topicsCount: Int, brokersCount: Int, clusterConfig: ClusterConfig) extends QueryResponse
   case class CMTopicIdentity(topicIdentity: Try[TopicIdentity]) extends QueryResponse
+  case class CMConsumerIdentity(consumerIdentity: Try[ConsumerIdentity]) extends QueryResponse
   case object CMShutdown extends CommandRequest
   case class CMCreateTopic(topic: String,
                            partitions: Int,
@@ -111,10 +114,14 @@ object ActorModel {
 
   sealed trait KSRequest extends QueryRequest
   case object KSGetTopics extends KSRequest
+  case object KSGetConsumers extends KSRequest
   case class KSGetTopicConfig(topic: String) extends KSRequest
   case class KSGetTopicDescription(topic: String) extends KSRequest
   case class KSGetAllTopicDescriptions(lastUpdateMillis: Option[Long]= None) extends KSRequest
   case class KSGetTopicDescriptions(topics: Set[String]) extends KSRequest
+  case class KSGetConsumerDescription(consumer: String) extends KSRequest
+  case class KSGetAllConsumerDescriptions(lastUpdateMillis: Option[Long]= None) extends KSRequest
+  case class KSGetConsumerDescriptions(consumers: Set[String]) extends KSRequest
   case object KSGetTopicsLastUpdateMillis extends KSRequest
   case object KSGetPreferredLeaderElection extends KSRequest
   case object KSGetReassignPartition extends KSRequest
@@ -128,6 +135,7 @@ object ActorModel {
 
   case class TopicList(list: IndexedSeq[String], deleteSet: Set[String]) extends QueryResponse
   case class TopicConfig(topic: String, config: Option[(Int,String)]) extends QueryResponse
+  case class ConsumerList(list: IndexedSeq[String]) extends QueryResponse
 
   case class TopicDescription(topic: String,
                               description: (Int,String),
@@ -142,9 +150,7 @@ object ActorModel {
                                       partitionOwners: Option[Map[Int, String]],
                                       partitionOffsets: Option[Map[Int, Int]])
   case class ConsumerDescription(consumer: String,
-                                 description: (Int,String),
-                                 topics: Map[String, ConsumedTopicDescription],
-                                 config:Option[(Int,String)]) extends  QueryResponse
+                                 topics: Map[String, ConsumedTopicDescription]) extends  QueryResponse
 
   case class ConsumerDescriptions(descriptions: IndexedSeq[ConsumerDescription], lastUpdateMillis: Long) extends QueryResponse
 
@@ -248,7 +254,7 @@ object ActorModel {
     }
 
     // a topic's log-size is the sum of its partitions' log-sizes
-    val logSize : Long = partitionsIdentity.flatMap(_._2.latestOffset).sum
+    val summedTopicOffsets : Long = partitionsIdentity.flatMap(_._2.latestOffset).sum
 
     val preferredReplicasPercentage : Int = (100 * partitionsIdentity.count(_._2.isPreferredLeader)) / partitions
 
@@ -350,75 +356,55 @@ object ActorModel {
     }
   }
 
-  case class ConsumerTopicState(consumerGroup: String,
+  case class ConsumedTopicState(consumerGroup: String,
                                 topic: String,
-                                topicId: Option[TopicIdentity],
+                                var topicId: Option[TopicIdentity], // TODO : making this variable might be avoidable, but for now it allows me to take care of the linking of consumers and topics until after identity-creation
                                 partitionOwners: IndexedSeq[(Int, Option[String])],
-                                partitionOffsets: IndexedSeq[(Int, Int)])
+                                partitionOffsets: IndexedSeq[(Int, Int)]) {
+    // Sum of the lag of all partitions
+    def totalLag : Option[Long] = {
+      for {
+        ti : TopicIdentity <- topicId
+        summedConsumerOffsets = partitionOffsets.map(_._2).sum
+        lag = ti.summedTopicOffsets - summedConsumerOffsets
+      } yield lag
+    }
+
+    // Percentage of the partitions that have an owner
+    def percentageCovered : Int = {
+      val numCovered = partitionOwners.filter(_._2.isDefined).size
+      100 * numCovered / partitionOwners.size
+    }
+  }
 
   case class ConsumerIdentity(consumerGroup:String,
-                              topicList: Seq[(String, ConsumerTopicState)],
-                              numBrokers: Int,
-                              configReadVersion: Int,
-                              config: List[(String,String)],
-                              clusterConfig: ClusterConfig,
-                              metrics: Option[BrokerMetrics] = None) 
+                              topicList: Seq[(String, ConsumedTopicState)],
+                              clusterConfig: ClusterConfig)
   object ConsumerIdentity {
 
     lazy val logger = LoggerFactory.getLogger(this.getClass)
 
-    import org.json4s.jackson.JsonMethods._
-    import org.json4s.scalaz.JsonScalaz._
     import scala.language.reflectiveCalls
 
-    def getConsumerTopicState(ctd: ConsumedTopicDescription): ConsumerTopicState = {
+    def getConsumerTopicState(ctd: ConsumedTopicDescription): ConsumedTopicState = {
       val partitionOffsetsMap = ctd.partitionOffsets.getOrElse(Map.empty)
       val partNum = partitionOffsetsMap.size
-      // TODO : How to link this to a topicIdentity
       val partitionOwners : IndexedSeq[(Int, Option[String])] = for {
         i <- 0 until partNum
         owner = ctd.partitionOwners.getOrElse(Map.empty).get(i)
       } yield (i, owner)
-      ConsumerTopicState(ctd.consumer, ctd.topic, None, partitionOwners, partitionOffsetsMap.toIndexedSeq.sortBy(_._1))
+      ConsumedTopicState(ctd.consumer, ctd.topic, None, partitionOwners, partitionOffsetsMap.toIndexedSeq.sortBy(_._1))
     }
 
-    implicit def from(brokers: Int,
-                      cd: ConsumerDescription,
-                      tm: Option[BrokerMetrics],
+    implicit def from(cd: ConsumerDescription,
                       clusterConfig: ClusterConfig) : ConsumerIdentity = {
-      // TODO : keeping the cluster config info for now
-      val config : (Int,Map[String, String]) = {
-        try {
-          val resultOption: Option[(Int,Map[String, String])] = cd.config.map { configString =>
-            val configJson = parse(configString._2)
-            val configMap : Map[String, String] = field[Map[String,String]]("config")(configJson).fold({ e =>
-              logger.error(s"Failed to parse topic config ${configString._2}")
-              Map.empty
-            }, identity)
-            (configString._1,configMap)
-          }
-          resultOption.getOrElse((-1,Map.empty[String, String]))
-        } catch {
-          case e: Exception =>
-            logger.error(s"[consumer=${cd.consumer}] Failed to parse consumer config : ${cd.config.getOrElse("")}",e)
-            (-1,Map.empty[String, String])
-        }
-      }
-      val topicMap: Seq[(String, ConsumerTopicState)] = for {
+      val topicMap: Seq[(String, ConsumedTopicState)] = for {
         (topic, ctd) <- cd.topics.toSeq
         cts = getConsumerTopicState(ctd)
       } yield (topic, cts)
       ConsumerIdentity(cd.consumer,
                        topicMap.sortBy(_._1),
-                       brokers,
-                       config._1,
-                       config._2.toList,
-                       clusterConfig,
-                       tm)
-    }
-
-    implicit def from(bl: BrokerList,cd: ConsumerDescription, tm: Option[BrokerMetrics], clusterConfig: ClusterConfig) : ConsumerIdentity = {
-      from(bl.list.size, cd, tm, clusterConfig)
+                       clusterConfig)
     }
   }
 

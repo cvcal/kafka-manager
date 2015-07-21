@@ -30,7 +30,8 @@ object Consumer extends Controller{
   }*/
 
   def consumers(cluster: String) = Action.async {
-    kafkaManager.getConsumerListExtended(cluster).map { errorOrConsumerList =>
+    val a = kafkaManager.getConsumerListExtended(cluster)
+    a.map { errorOrConsumerList =>
       Ok(views.html.consumer.consumerList(cluster, errorOrConsumerList))
     }
   }
@@ -41,6 +42,6 @@ object Consumer extends Controller{
     }
   }
 
-  def consumerAndTopic(cluster: String, consumerGroup: String, topic: String) = TODO
+  def consumerAndTopic(cluster: String, consumerGroup: String, topic: String) = TODO //TODO : make the consumed-topic page!
 
 }

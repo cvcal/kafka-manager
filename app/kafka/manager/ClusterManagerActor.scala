@@ -181,6 +181,14 @@ class ClusterManagerActor(cmConfig: ClusterManagerActorConfig)
         } yield tdO.map( td => CMTopicIdentity(Try(TopicIdentity.from(bl,td,tm,cmConfig.clusterConfig))))
         result pipeTo sender
 
+      case CMGetConsumerIdentity(consumer) =>
+        implicit val ec = context.dispatcher
+        val eventualConsumerDescription = withKafkaStateActor(KSGetConsumerDescription(consumer))(identity[Option[ConsumerDescription]])
+        val result: Future[Option[CMConsumerIdentity]] = for {
+          cdO <- eventualConsumerDescription
+        } yield cdO.map( cd => CMConsumerIdentity(Try(ConsumerIdentity.from(cd,cmConfig.clusterConfig))))
+        result pipeTo sender
+
       case any: Any => log.warning("cma : processQueryResponse : Received unknown message: {}", any)
     }
   }
