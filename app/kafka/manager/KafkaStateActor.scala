@@ -205,7 +205,7 @@ class KafkaStateActor(curator: CuratorFramework,
       }
       partitionOffsets = getPartitionOffsets(topic, states)
       config = getTopicConfigString(topic)
-    } yield TopicDescription(topic, description, Option(states), Some(partitionOffsets), config, deleteSupported)
+    } yield TopicDescription(topic, description, Option(states), partitionOffsets, config, deleteSupported)
   }
 
   private[this] def getTopicConfigString(topic: String) : Option[(Int,String)] = {
@@ -216,30 +216,35 @@ class KafkaStateActor(curator: CuratorFramework,
 
   def getConsumerDescription(consumer: String) : Option[ConsumerDescription] = {
     val offsetPath = "%s/%s/%s".format(ZkUtils.ConsumersPath,consumer,"offsets")
-    val topicOption : Option[Map[String, ChildData]] = Option(consumersTreeCache.getCurrentChildren(offsetPath)).map(_.asScala.toMap)
-    for {
-      topics <- topicOption
-      topicDescritionSeq : Seq[(String, ConsumedTopicDescription)] = for {
-        topicAndData : (String, ChildData) <- topics.toList
-        topic = topicAndData._1
-        topicDesc = getConsumedTopicDescription(consumer, topic)
-      } yield (topic, topicDesc)
-    } yield ConsumerDescription(consumer, topicDescritionSeq.toMap)
+    val topicOffsetOption : Option[Map[String, ChildData]] = Option(consumersTreeCache.getCurrentChildren(offsetPath)).map(_.asScala.toMap)
+
+
+    val topicDescriptions: Option[Map[String, ConsumedTopicDescription]] =
+      topicOffsetOption.map[List[(String, ConsumedTopicDescription)]] { topics: Map[String, ChildData] =>
+      for {
+        topicAndData: (String, ChildData) <- topics.toList
+        topicDesc = getConsumedTopicDescription(consumer, topicAndData._1)
+      } yield (topicAndData._1, topicDesc)
+    }.map(_.toMap)
+
+    topicDescriptions.map(ConsumerDescription(consumer, _))
   }
 
   private[this] def getConsumedTopicDescription(consumer:String, topic:String) : ConsumedTopicDescription = {
     val offsetPath = "%s/%s/%s/%s".format(ZkUtils.ConsumersPath, consumer, "offsets", topic)
     val ownerPath = "%s/%s/%s/%s".format(ZkUtils.ConsumersPath, consumer, "owners", topic)
-    val partitionOffsets: Option[Map[Int, Int]] = for {
+    val partitionOffsets: Option[Map[Int, Long]] = for {
       offsetsByPartition: Map[String, ChildData] <- Option(consumersTreeCache.getCurrentChildren(offsetPath)).map(_.asScala.toMap)
-      offsets : Map[Int, Int] = offsetsByPartition map {case (part, data) => (part.toInt, asString(data.getData).toInt)}
+      offsets : Map[Int, Long] = offsetsByPartition map {case (part, data) => (part.toInt, asString(data.getData).toLong)}
     } yield offsets
 
     val partitionOwners: Option[Map[Int, String]] = for {
       ownersByPartition: Map[String, ChildData] <- Option(consumersTreeCache.getCurrentChildren(ownerPath)).map(_.asScala.toMap)
       owners : Map[Int, String] = ownersByPartition map { case (part, data) => (part.toInt, asString(data.getData)) }
     } yield owners
-    ConsumedTopicDescription(topic, consumer, partitionOwners, partitionOffsets)
+
+    val topicDescription = getTopicDescription(topic)
+    ConsumedTopicDescription(consumer, topic, topicDescription, partitionOwners, partitionOffsets)
   }
 
   override def processActorResponse(response: ActorResponse): Unit = {
@@ -348,6 +353,9 @@ class KafkaStateActor(curator: CuratorFramework,
 
       case KSGetConsumerDescription(consumer) =>
         sender ! getConsumerDescription(consumer)
+
+      case KSGetConsumedTopicDescription(consumer, topic) =>
+        sender ! getConsumedTopicDescription(consumer,topic)
 
       case KSGetConsumerDescriptions(consumers) =>
         sender ! ConsumerDescriptions(consumers.toIndexedSeq.map(getConsumerDescription).flatten, consumersTreeCacheLastUpdateMillis)

@@ -15,7 +15,13 @@
         <tr>
             <td><a href="@routes.Consumer.consumer(cluster,consumer)">@consumer</a></td>
             <td>
-                @consumerIdentityOpt.map(ci => ci.topicList.foreach(x => <a href="@routes.Consumer.consumerAndTopic(cluster,consumer,x_.1)">@x._1</a>)).getOrElse(" ")
+                @consumerIdentityOpt.fold{
+                    No details available for this consumer at this time
+                }{ a:kafka.manager.ActorModel.ConsumerIdentity =>
+                    @for(topic : String <- a.topicMap.keys) {
+                        <a href="@routes.Consumer.consumerAndTopic(cluster,consumer,topic)">@topic,  </a>
+                    }
+                }
             </td>
         </tr>
     }

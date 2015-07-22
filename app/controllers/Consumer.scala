@@ -20,18 +20,8 @@ object Consumer extends Controller{
 
   private[this] val kafkaManager = KafkaManagerContext.getKafkaManager
 
-/*  val validateName : Constraint[String] = Constraint("validate name") { name =>
-    Try {
-      kafka.manager.utils.Consumer.validate(name)
-    } match {
-      case Failure(t) => Invalid(t.getMessage)
-      case Success(_) => Valid
-    }
-  }*/
-
   def consumers(cluster: String) = Action.async {
-    val a = kafkaManager.getConsumerListExtended(cluster)
-    a.map { errorOrConsumerList =>
+    kafkaManager.getConsumerListExtended(cluster).map { errorOrConsumerList =>
       Ok(views.html.consumer.consumerList(cluster, errorOrConsumerList))
     }
   }
@@ -42,6 +32,9 @@ object Consumer extends Controller{
     }
   }
 
-  def consumerAndTopic(cluster: String, consumerGroup: String, topic: String) = TODO //TODO : make the consumed-topic page!
-
+  def consumerAndTopic(cluster: String, consumerGroup: String, topic: String) = Action.async {
+    kafkaManager.getConsumedTopicState(cluster,consumerGroup,topic).map { errorOrConsumedTopicState =>
+      Ok(views.html.consumer.consumedTopicView(cluster,consumerGroup,topic,errorOrConsumedTopicState))
+    }
+  }
 }

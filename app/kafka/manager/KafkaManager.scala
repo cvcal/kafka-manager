@@ -519,11 +519,11 @@ class KafkaManager(akkaConfig: Config)
   }
 
   def getConsumerIdentity(clusterName: String, consumer: String): Future[ApiError \/ ConsumerIdentity] = {
-    val futureCMTopicIdentity = tryWithKafkaManagerActor(KMClusterQueryRequest(clusterName, CMGetConsumerIdentity(consumer)))(
+    val futureCMConsumerIdentity = tryWithKafkaManagerActor(KMClusterQueryRequest(clusterName, CMGetConsumerIdentity(consumer)))(
       identity[Option[CMConsumerIdentity]]
     )
     implicit val ec = apiExecutionContext
-    futureCMTopicIdentity.map[ApiError \/ ConsumerIdentity] { errOrCI =>
+    futureCMConsumerIdentity.map[ApiError \/ ConsumerIdentity] { errOrCI =>
       errOrCI.fold[ApiError \/ ConsumerIdentity](
       { err: ApiError =>
         -\/[ApiError](err)
@@ -539,6 +539,27 @@ class KafkaManager(akkaConfig: Config)
           }
         }
       }
+      )
+    }
+  }
+
+  def getConsumedTopicState(clusterName: String, consumer: String, topic: String): Future[ApiError \/ ConsumedTopicState] = {
+    val futureCMConsumedTopic = tryWithKafkaManagerActor(KMClusterQueryRequest(clusterName, CMGetConsumedTopicState(consumer,topic)))(
+      identity[CMConsumedTopic]
+    )
+    implicit val ec = apiExecutionContext
+    futureCMConsumedTopic.map[ApiError \/ ConsumedTopicState] { errOrCT =>
+      errOrCT.fold[ApiError \/ ConsumedTopicState](
+      { err: ApiError =>
+        -\/[ApiError](err)
+      }, { cmConsumedTopic: CMConsumedTopic =>
+          cmConsumedTopic.ctIdentity match {
+            case scala.util.Failure(c) =>
+              -\/[ApiError](c)
+            case scala.util.Success(ci) =>
+              \/-(ci)
+          }
+        }
       )
     }
   }

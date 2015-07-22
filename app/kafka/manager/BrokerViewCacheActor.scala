@@ -176,9 +176,7 @@ class BrokerViewCacheActor(config: BrokerViewCacheActorConfig) extends LongRunni
   private[this] def updateView(): Unit = {
     updateViewForBrokersAndTopics()
     updateViewsForConsumers()
-
-    // Now try to link the topics with the consumers that read from them and vice-versa
-    // TODO : linking consumers and topics
+    linkConsumersAndTopics()
   }
 
   private[this] def updateViewForBrokersAndTopics(): Unit = {
@@ -269,5 +267,9 @@ class BrokerViewCacheActor(config: BrokerViewCacheActorConfig) extends LongRunni
           ConsumerIdentity.from(_, config.clusterConfig))
       consumerIdentities = consumerIdentity.map(ci => (ci.consumerGroup, ci)).toMap
     }
+  }
+
+  private[this] def linkConsumersAndTopics(): Unit = {
+    //TODO - if I want to link the topics to the consumers
   }
 }
