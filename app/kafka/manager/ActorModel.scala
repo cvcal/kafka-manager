@@ -33,6 +33,8 @@ object ActorModel {
 
   case object BVForceUpdate extends CommandRequest
   case object BVGetTopicIdentities extends BVRequest
+  case object BVGetTopicConsumerMap extends BVRequest
+  case object BVGetConsumerIdentities extends BVRequest
   case class BVGetView(id: Int) extends BVRequest
   case object BVGetViews extends BVRequest
   case class BVGetTopicMetrics(topic: String) extends BVRequest
@@ -48,8 +50,12 @@ object ActorModel {
 
   case object CMGetView extends QueryRequest
   case class CMGetTopicIdentity(topic: String) extends QueryRequest
+  case class CMGetConsumerIdentity(consumer: String) extends QueryRequest
+  case class CMGetConsumedTopicState(consumer: String, topic: String) extends QueryRequest
   case class CMView(topicsCount: Int, brokersCount: Int, clusterConfig: ClusterConfig) extends QueryResponse
   case class CMTopicIdentity(topicIdentity: Try[TopicIdentity]) extends QueryResponse
+  case class CMConsumerIdentity(consumerIdentity: Try[ConsumerIdentity]) extends QueryResponse
+  case class CMConsumedTopic(ctIdentity: Try[ConsumedTopicState]) extends QueryResponse
   case object CMShutdown extends CommandRequest
   case class CMCreateTopic(topic: String,
                            partitions: Int,
@@ -111,10 +117,15 @@ object ActorModel {
 
   sealed trait KSRequest extends QueryRequest
   case object KSGetTopics extends KSRequest
+  case object KSGetConsumers extends KSRequest
   case class KSGetTopicConfig(topic: String) extends KSRequest
   case class KSGetTopicDescription(topic: String) extends KSRequest
   case class KSGetAllTopicDescriptions(lastUpdateMillis: Option[Long]= None) extends KSRequest
   case class KSGetTopicDescriptions(topics: Set[String]) extends KSRequest
+  case class KSGetConsumerDescription(consumer: String) extends KSRequest
+  case class KSGetConsumedTopicDescription(consumer: String, topic: String) extends KSRequest
+  case class KSGetAllConsumerDescriptions(lastUpdateMillis: Option[Long]= None) extends KSRequest
+  case class KSGetConsumerDescriptions(consumers: Set[String]) extends KSRequest
   case object KSGetTopicsLastUpdateMillis extends KSRequest
   case object KSGetPreferredLeaderElection extends KSRequest
   case object KSGetReassignPartition extends KSRequest
@@ -128,14 +139,25 @@ object ActorModel {
 
   case class TopicList(list: IndexedSeq[String], deleteSet: Set[String]) extends QueryResponse
   case class TopicConfig(topic: String, config: Option[(Int,String)]) extends QueryResponse
+  case class ConsumerList(list: IndexedSeq[String]) extends QueryResponse
 
   case class TopicDescription(topic: String,
                               description: (Int,String),
                               partitionState: Option[Map[String, String]],
-                              partitionOffsets : Option[Map[Int, Option[Long]]],
+                              partitionOffsets: Map[Int, Option[Long]],
                               config:Option[(Int,String)],
                               deleteSupported: Boolean) extends  QueryResponse
   case class TopicDescriptions(descriptions: IndexedSeq[TopicDescription], lastUpdateMillis: Long) extends QueryResponse
+
+  case class ConsumedTopicDescription(consumer: String,
+                                      topic: String,
+                                      topicDescription: Option[TopicDescription],
+                                      partitionOwners: Option[Map[Int, String]],
+                                      partitionOffsets: Option[Map[Int, Long]])
+  case class ConsumerDescription(consumer: String,
+                                 topics: Map[String, ConsumedTopicDescription]) extends  QueryResponse
+
+  case class ConsumerDescriptions(descriptions: IndexedSeq[ConsumerDescription], lastUpdateMillis: Long) extends QueryResponse
 
   case class BrokerList(list: IndexedSeq[BrokerIdentity], clusterConfig: ClusterConfig) extends QueryResponse
 
@@ -237,7 +259,7 @@ object ActorModel {
     }
 
     // a topic's log-size is the sum of its partitions' log-sizes
-    val logSize : Long = partitionsIdentity.flatMap(_._2.latestOffset).sum
+    val summedTopicOffsets : Long = partitionsIdentity.flatMap(_._2.latestOffset).sum
 
     val preferredReplicasPercentage : Int = (100 * partitionsIdentity.count(_._2.isPreferredLeader)) / partitions
 
@@ -281,13 +303,11 @@ object ActorModel {
 
       // Assign it to the TPI format
       val tpi : Map[Int,TopicPartitionIdentity] = partMap.map { case (partition, replicas) =>
-        (partition.toInt,TopicPartitionIdentity.from(partition.toInt,
-                                                     stateMap.get(partition),
-                                                     td.partitionOffsets match {
-                                                       case Some(set) => set.getOrElse(partition.toInt, None)
-                                                       case None => None
-                                                     },
-                                                     replicas))
+        val partitionNum = partition.toInt
+        (partitionNum,TopicPartitionIdentity.from(partitionNum,
+                                                  stateMap.get(partition),
+                                                  td.partitionOffsets.get(partitionNum).getOrElse(None),
+                                                  replicas))
       }
       val config : (Int,Map[String, String]) = {
         try {
@@ -336,6 +356,68 @@ object ActorModel {
           currentTopicIdentity.clusterConfig,
           currentTopicIdentity.metrics)
       }
+    }
+  }
+
+  case class ConsumedTopicState(consumerGroup: String,
+                                topic: String,
+                                partitionLatestOffsets: Map[Int, Option[Long]],
+                                partitionOwners: Map[Int, String],
+                                partitionOffsets: Map[Int, Long]) {
+    lazy val totalLag : Option[Long] = {
+      // only defined if every partition has a latest offset
+      val actualOffsets = partitionLatestOffsets.values.collect{case Some(x:Long) => x}
+      if (actualOffsets.size == partitionLatestOffsets.size) {
+          Some(actualOffsets.sum - partitionOffsets.values.sum)
+      } else None
+    }
+    def topicOffsets(partitionNum: Int) : Option[Long] = partitionLatestOffsets.get(partitionNum).flatten
+
+    def partitionLag(partitionNum: Int) : Option[Long] = {
+      topicOffsets(partitionNum).flatMap{latestOffset: Long =>
+        partitionOffsets.get(partitionNum).map(latestOffset - _)
+      }
+    }
+
+    // Percentage of the partitions that have an owner
+    def percentageCovered : Option[Int] = {
+      if (partitionOwners.isEmpty) {
+        None
+      } else {
+        val numCovered = partitionOwners.size
+        val numPartitions = partitionOwners.keys.max+1
+        Some(100 * numCovered / numPartitions)
+      }
+    }
+  }
+  object ConsumedTopicState {
+    def from(ctd: ConsumedTopicDescription): ConsumedTopicState = {
+      val partitionOffsetsMap = ctd.partitionOffsets.getOrElse(Map.empty)
+      val partitionOwnersMap = ctd.partitionOwners.getOrElse(Map.empty)
+      val topicOffsetsOptMap = ctd.topicDescription.map(_.partitionOffsets).getOrElse(Map.empty)
+      ConsumedTopicState(ctd.consumer, ctd.topic, topicOffsetsOptMap, partitionOwnersMap, partitionOffsetsMap)
+    }
+  }
+
+  case class ConsumerIdentity(consumerGroup:String,
+                              topicMap: Map[String, ConsumedTopicState],
+                              clusterConfig: ClusterConfig)
+  object ConsumerIdentity {
+
+    lazy val logger = LoggerFactory.getLogger(this.getClass)
+
+    import scala.language.reflectiveCalls
+
+    implicit def from(cd: ConsumerDescription,
+
+                      clusterConfig: ClusterConfig) : ConsumerIdentity = {
+      val topicMap: Seq[(String, ConsumedTopicState)] = for {
+        (topic, ctd) <- cd.topics.toSeq
+        cts = ConsumedTopicState.from(ctd)
+      } yield (topic, cts)
+      ConsumerIdentity(cd.consumer,
+                       topicMap.toMap,
+                       clusterConfig)
     }
   }
 

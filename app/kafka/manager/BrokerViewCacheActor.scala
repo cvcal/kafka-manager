@@ -29,6 +29,12 @@ class BrokerViewCacheActor(config: BrokerViewCacheActorConfig) extends LongRunni
 
   private[this] var topicDescriptionsOption : Option[TopicDescriptions] = None
 
+  private[this] var topicConsumerMap : Map[String, Iterable[String]] = Map.empty
+
+  private[this] var consumerIdentities : Map[String, ConsumerIdentity] = Map.empty
+
+  private[this] var consumerDescriptionsOption : Option[ConsumerDescriptions] = None
+
   private[this] var brokerListOption : Option[BrokerList] = None
 
   private[this] var brokerMetrics : Map[Int, BrokerMetrics] = Map.empty
@@ -108,6 +114,7 @@ class BrokerViewCacheActor(config: BrokerViewCacheActorConfig) extends LongRunni
         //ask for topic descriptions
         val lastUpdateMillisOption: Option[Long] = topicDescriptionsOption.map(_.lastUpdateMillis)
         context.actorSelection(config.kafkaStateActorPath).tell(KSGetAllTopicDescriptions(lastUpdateMillisOption), self)
+        context.actorSelection(config.kafkaStateActorPath).tell(KSGetAllConsumerDescriptions(lastUpdateMillisOption), self)
         context.actorSelection(config.kafkaStateActorPath).tell(KSGetBrokers, self)
 
       case BVGetViews =>
@@ -127,6 +134,12 @@ class BrokerViewCacheActor(config: BrokerViewCacheActorConfig) extends LongRunni
 
       case BVGetTopicIdentities =>
         sender ! topicIdentities
+
+      case BVGetTopicConsumerMap =>
+        sender ! topicConsumerMap
+
+      case BVGetConsumerIdentities =>
+        sender ! consumerIdentities
 
       case BVUpdateTopicMetricsForBroker(id, metrics) =>
         metrics.foreach {
@@ -153,6 +166,10 @@ class BrokerViewCacheActor(config: BrokerViewCacheActorConfig) extends LongRunni
         topicDescriptionsOption = Some(td)
         updateView()
 
+      case cd: ConsumerDescriptions =>
+        consumerDescriptionsOption = Some(cd)
+        updateView()
+
       case bl: BrokerList =>
         brokerListOption = Some(bl)
         updateView()
@@ -162,6 +179,11 @@ class BrokerViewCacheActor(config: BrokerViewCacheActorConfig) extends LongRunni
   }
 
   private[this] def updateView(): Unit = {
+    updateViewForBrokersAndTopics()
+    updateViewsForConsumers()
+  }
+
+  private[this] def updateViewForBrokersAndTopics(): Unit = {
     for {
       brokerList <- brokerListOption
       topicDescriptions <- topicDescriptionsOption
@@ -187,7 +209,7 @@ class BrokerViewCacheActor(config: BrokerViewCacheActorConfig) extends LongRunni
                       mbsc =>
                         topicPartitions.map {
                           case (topic, id, partitions) =>
-                            (topic.topic, 
+                            (topic.topic,
                               KafkaMetrics.getBrokerMetrics(config.clusterConfig.version, mbsc, Option(topic.topic)))
                         }
                     }
@@ -238,6 +260,20 @@ class BrokerViewCacheActor(config: BrokerViewCacheActorConfig) extends LongRunni
           brokerTopicPartitions.put(
             brokerId,BVView(topicPartitionsMap, config.clusterConfig, brokerMetrics.get(brokerId)))
       }
+    }
+  }
+
+  private[this] def updateViewsForConsumers(): Unit = {
+    for {
+      consumerDescriptions <- consumerDescriptionsOption
+    } {
+      val consumerIdentity : IndexedSeq[ConsumerIdentity] = consumerDescriptions.descriptions.map(
+          ConsumerIdentity.from(_, config.clusterConfig))
+      consumerIdentities = consumerIdentity.map(ci => (ci.consumerGroup, ci)).toMap
+
+      val c2tMap = consumerDescriptions.descriptions.map{cd: ConsumerDescription =>
+        (cd.consumer, cd.topics.keys.toList)}.toMap
+      topicConsumerMap = c2tMap.values.flatten.map(v => (v, c2tMap.keys.filter(c2tMap(_).contains(v)))).toMap
     }
   }
 }
