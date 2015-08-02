@@ -3,7 +3,12 @@
 * See accompanying LICENSE file.
 *@
 @import b3.vertical.fieldConstructor
-@(cluster:String,topic: String, topicIdentity: kafka.manager.ActorModel.TopicIdentity)
+@import scalaz.{\/}
+@(cluster:String,
+  topic: String,
+  topicIdentity: kafka.manager.ActorModel.TopicIdentity,
+  consumerList: Iterable[String]
+)
 
 @getUnderReplicatedLevel(percentage: Int) = {
     @percentage match {
@@ -201,6 +206,18 @@
                         <td class="@getBrokerIsSkewedLevel(btp.isSkewed)">
                             @btp.isSkewed
                         </td>
+                    </tr>
+                    }
+                    </tbody>
+                </table>
+            </div>
+            <div class="panel panel-default">
+                <div class="panel-heading"><h4>Consumers consuming from this topic</h4></div>
+                <table class="table">
+                    <tbody>
+                    @for(c:String <- consumerList) {
+                    <tr>
+                        <td><a href="@routes.Consumer.consumerAndTopic(cluster,c,topic)">@c</a></td>
                     </tr>
                     }
                     </tbody>

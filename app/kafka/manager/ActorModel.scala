@@ -33,6 +33,7 @@ object ActorModel {
 
   case object BVForceUpdate extends CommandRequest
   case object BVGetTopicIdentities extends BVRequest
+  case object BVGetTopicConsumerMap extends BVRequest
   case object BVGetConsumerIdentities extends BVRequest
   case class BVGetView(id: Int) extends BVRequest
   case object BVGetViews extends BVRequest
