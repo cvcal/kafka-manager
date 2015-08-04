@@ -5,12 +5,16 @@
 
 package kafka.manager
 
+import kafka.api.{PartitionOffsetRequestInfo, OffsetRequest}
+import kafka.consumer.SimpleConsumer
+import kafka.cluster.Broker
+import kafka.common.TopicAndPartition
 import kafka.manager.utils.zero81.{ReassignPartitionCommand, PreferredReplicaLeaderElectionCommand}
 import org.apache.curator.framework.recipes.cache.PathChildrenCache.StartMode
 import org.apache.curator.framework.recipes.cache._
 import org.apache.curator.framework.CuratorFramework
 import org.joda.time.{DateTimeZone, DateTime}
-import kafka.manager.utils.{TopicAndPartition, ZkUtils}
+import kafka.manager.utils.ZkUtils
 
 import scala.collection.mutable
 import scala.util.{Success, Failure, Try}
@@ -28,6 +32,8 @@ class KafkaStateActor(curator: CuratorFramework,
   // e.g. /brokers/topics/analytics_content/partitions/0/state
   private[this] val topicsTreeCache = new TreeCache(curator,ZkUtils.BrokerTopicsPath)
 
+  private[this] val consumersTreeCache = new TreeCache(curator,ZkUtils.ConsumersPath)
+
   private[this] val topicsConfigPathCache = new PathChildrenCache(curator,ZkUtils.TopicConfigPath,true)
 
   private[this] val brokersPathCache = new PathChildrenCache(curator,ZkUtils.BrokerIdsPath,true)
@@ -39,6 +45,9 @@ class KafkaStateActor(curator: CuratorFramework,
   @volatile
   private[this] var topicsTreeCacheLastUpdateMillis : Long = System.currentTimeMillis()
 
+  @volatile
+  private[this] var consumersTreeCacheLastUpdateMillis : Long = System.currentTimeMillis()
+
   private[this] val topicsTreeCacheListener = new TreeCacheListener {
     override def childEvent(client: CuratorFramework, event: TreeCacheEvent): Unit = {
       event.getType match {
@@ -46,7 +55,19 @@ class KafkaStateActor(curator: CuratorFramework,
              TreeCacheEvent.Type.NODE_REMOVED | TreeCacheEvent.Type.NODE_UPDATED =>
           topicsTreeCacheLastUpdateMillis = System.currentTimeMillis()
         case _ =>
-          //do nothing
+        //do nothing
+      }
+    }
+  }
+
+  private[this] val consumersTreeCacheListener = new TreeCacheListener {
+    override def childEvent(client: CuratorFramework, event: TreeCacheEvent): Unit = {
+      event.getType match {
+        case TreeCacheEvent.Type.INITIALIZED | TreeCacheEvent.Type.NODE_ADDED |
+             TreeCacheEvent.Type.NODE_REMOVED | TreeCacheEvent.Type.NODE_UPDATED =>
+          consumersTreeCacheLastUpdateMillis = System.currentTimeMillis()
+        case _ =>
+        //do nothing
       }
     }
   }
@@ -115,6 +136,8 @@ class KafkaStateActor(curator: CuratorFramework,
     log.info("Started actor %s".format(self.path))
     log.info("Starting topics tree cache...")
     topicsTreeCache.start()
+    log.info("Starting consumers tree cache...")
+    consumersTreeCache.start()
     log.info("Starting topics config path cache...")
     topicsConfigPathCache.start(StartMode.BUILD_INITIAL_CACHE)
     log.info("Starting brokers path cache...")
@@ -126,6 +149,8 @@ class KafkaStateActor(curator: CuratorFramework,
 
     log.info("Adding topics tree cache listener...")
     topicsTreeCache.getListenable.addListener(topicsTreeCacheListener)
+    log.info("Adding consumers tree cache listener...")
+    consumersTreeCache.getListenable.addListener(consumersTreeCacheListener)
     log.info("Adding admin path cache listener...")
     adminPathCache.getListenable.addListener(adminPathCacheListener)
   }
@@ -144,6 +169,8 @@ class KafkaStateActor(curator: CuratorFramework,
 
     log.info("Removing admin path cache listener...")
     Try(adminPathCache.getListenable.removeListener(adminPathCacheListener))
+    log.info("Removing consumers tree cache listener...")
+    Try(consumersTreeCache.getListenable.removeListener(consumersTreeCacheListener))
     log.info("Removing topics tree cache listener...")
     Try(topicsTreeCache.getListenable.removeListener(topicsTreeCacheListener))
 
@@ -155,6 +182,8 @@ class KafkaStateActor(curator: CuratorFramework,
     Try(brokersPathCache.close())
     log.info("Shutting down topics config path cache...")
     Try(topicsConfigPathCache.close())
+    log.info("Shutting down consumers tree cache...")
+    Try(consumersTreeCache.close())
     log.info("Shutting down topics tree cache...")
     Try(topicsTreeCache.close())
 
@@ -174,8 +203,48 @@ class KafkaStateActor(curator: CuratorFramework,
         val statePath = s"$partitionsPath/$part/state"
         Option(topicsTreeCache.getCurrentData(statePath)).map(cd => (part, asString(cd.getData)))
       }
+      partitionOffsets = getPartitionOffsets(topic, states)
       config = getTopicConfigString(topic)
-    } yield TopicDescription(topic, description, Option(states),config, deleteSupported)
+    } yield TopicDescription(topic, description, Option(states), partitionOffsets, config, deleteSupported)
+  }
+
+  private[this] def getTopicConfigString(topic: String) : Option[(Int,String)] = {
+    val data: mutable.Buffer[ChildData] = topicsConfigPathCache.getCurrentData.asScala
+    val result: Option[ChildData] = data.find(p => p.getPath.endsWith(topic))
+    result.map(cd => (cd.getStat.getVersion,asString(cd.getData)))
+  }
+
+  def getConsumerDescription(consumer: String) : Option[ConsumerDescription] = {
+    val offsetPath = "%s/%s/%s".format(ZkUtils.ConsumersPath,consumer,"offsets")
+    val topicOffsetOption : Option[Map[String, ChildData]] = Option(consumersTreeCache.getCurrentChildren(offsetPath)).map(_.asScala.toMap)
+
+
+    val topicDescriptions: Option[Map[String, ConsumedTopicDescription]] =
+      topicOffsetOption.map[List[(String, ConsumedTopicDescription)]] { topics: Map[String, ChildData] =>
+      for {
+        topicAndData: (String, ChildData) <- topics.toList
+        topicDesc = getConsumedTopicDescription(consumer, topicAndData._1)
+      } yield (topicAndData._1, topicDesc)
+    }.map(_.toMap)
+
+    topicDescriptions.map(ConsumerDescription(consumer, _))
+  }
+
+  private[this] def getConsumedTopicDescription(consumer:String, topic:String) : ConsumedTopicDescription = {
+    val offsetPath = "%s/%s/%s/%s".format(ZkUtils.ConsumersPath, consumer, "offsets", topic)
+    val ownerPath = "%s/%s/%s/%s".format(ZkUtils.ConsumersPath, consumer, "owners", topic)
+    val partitionOffsets: Option[Map[Int, Long]] = for {
+      offsetsByPartition: Map[String, ChildData] <- Option(consumersTreeCache.getCurrentChildren(offsetPath)).map(_.asScala.toMap)
+      offsets : Map[Int, Long] = offsetsByPartition map {case (part, data) => (part.toInt, asString(data.getData).toLong)}
+    } yield offsets
+
+    val partitionOwners: Option[Map[Int, String]] = for {
+      ownersByPartition: Map[String, ChildData] <- Option(consumersTreeCache.getCurrentChildren(ownerPath)).map(_.asScala.toMap)
+      owners : Map[Int, String] = ownersByPartition map { case (part, data) => (part.toInt, asString(data.getData)) }
+    } yield owners
+
+    val topicDescription = getTopicDescription(topic)
+    ConsumedTopicDescription(consumer, topic, topicDescription, partitionOwners, partitionOffsets)
   }
 
   override def processActorResponse(response: ActorResponse): Unit = {
@@ -183,11 +252,65 @@ class KafkaStateActor(curator: CuratorFramework,
       case any: Any => log.warning("ksa : processActorResponse : Received unknown message: {}", any.toString)
     }
   }
-  
-  private[this] def getTopicConfigString(topic: String) : Option[(Int,String)] = {
-    val data: mutable.Buffer[ChildData] = topicsConfigPathCache.getCurrentData.asScala
-    val result: Option[ChildData] = data.find(p => p.getPath.endsWith(topic))
-    result.map(cd => (cd.getStat.getVersion,asString(cd.getData)))
+
+
+  // conversion between BrokerIdentity and the kafka library's broker case class
+  implicit def brokerIdentity2Broker(id : BrokerIdentity) : Broker = {
+    Broker(id.id, id.host, id.port)
+  }
+
+
+  // Get the latest offsets for the partitions described in the states map,
+  // Code based off of the GetOffsetShell tool in kafka.tools, kafka 0.8.2.1
+  private def getPartitionOffsets(topic: String, states: Map[String, String]) : Map[Int,Option[Long]] = {
+    val clientId = "partitionOffsetGetter"
+    val targetBrokers : IndexedSeq[Broker] = getBrokers.map(brokerIdentity2Broker)
+    val time = -1
+    val nOffsets = 1
+    val maxWaitMs = 1000
+
+    // Get partition leader broker information
+    import org.json4s.jackson.JsonMethods.parse
+    import org.json4s.scalaz.JsonScalaz.field
+    val partitionsWithLeaders : List[(Int, Option[Broker])] = for {
+      (part, state) <- states.toList
+      partition = part.toInt
+      descJson = parse(state)
+      leaderID = field[Int]("leader")(descJson).fold({ e =>
+        log.error(s"[topic=$topic] Failed to get partitions from topic json $state"); 0}, identity)
+      leader = targetBrokers.find(_.id == leaderID)
+    } yield (partition, leader)
+
+    // Get the latest offset for each partition
+    val partitionToOffset = for {
+      (partitionId, optLeader) <- partitionsWithLeaders.sortBy(_._1)
+      partitionOffset: Option[Long] = optLeader match {
+        case Some(leader) =>
+          val consumer = new SimpleConsumer(leader.host, leader.port, 10000, 100000, clientId)
+          val topicAndPartition = TopicAndPartition(topic, partitionId)
+          val request = OffsetRequest(Map(topicAndPartition -> PartitionOffsetRequestInfo(time, nOffsets)))
+          val offsets = consumer.getOffsetsBefore(request).partitionErrorAndOffsets(topicAndPartition).offsets
+          offsets.headOption
+        case None => None
+      }
+    } yield (partitionId, partitionOffset)
+    partitionToOffset.toMap
+  }
+
+  private[this] def getBrokers : IndexedSeq[BrokerIdentity] = {
+    val data: mutable.Buffer[ChildData] = brokersPathCache.getCurrentData.asScala
+    data.map { cd =>
+      BrokerIdentity.from(nodeFromPath(cd.getPath).toInt, asString(cd.getData))
+    }.filter { v =>
+      v match {
+        case scalaz.Failure(nel) =>
+          log.error(s"Failed to parse broker config $nel")
+          false
+        case _ => true
+      }
+    }.collect {
+      case scalaz.Success(bi) => bi
+    }.toIndexedSeq.sortBy(_.id)
   }
 
   override def processQueryRequest(request: QueryRequest): Unit = {
@@ -208,7 +331,16 @@ class KafkaStateActor(curator: CuratorFramework,
         }.fold {
           sender ! TopicList(IndexedSeq.empty, deleteSet)
         } { data: java.util.Map[String, ChildData] =>
-          sender ! TopicList(data.asScala.map(kv => kv._1).toIndexedSeq, deleteSet)
+          sender ! TopicList(data.asScala.keySet.toIndexedSeq, deleteSet)
+        }
+
+      case KSGetConsumers =>
+        withConsumersTreeCache { cache =>
+            cache.getCurrentChildren(ZkUtils.ConsumersPath)
+        }.fold {
+          sender ! ConsumerList(IndexedSeq.empty)
+        } { data: java.util.Map[String, ChildData] =>
+          sender ! ConsumerList(data.asScala.keySet.toIndexedSeq)
         }
 
       case KSGetTopicConfig(topic) =>
@@ -219,6 +351,15 @@ class KafkaStateActor(curator: CuratorFramework,
 
       case KSGetTopicDescriptions(topics) =>
         sender ! TopicDescriptions(topics.toIndexedSeq.map(getTopicDescription).flatten, topicsTreeCacheLastUpdateMillis)
+
+      case KSGetConsumerDescription(consumer) =>
+        sender ! getConsumerDescription(consumer)
+
+      case KSGetConsumedTopicDescription(consumer, topic) =>
+        sender ! getConsumedTopicDescription(consumer,topic)
+
+      case KSGetConsumerDescriptions(consumers) =>
+        sender ! ConsumerDescriptions(consumers.toIndexedSeq.map(getConsumerDescription).flatten, consumersTreeCacheLastUpdateMillis)
 
       case KSGetAllTopicDescriptions(lastUpdateMillisOption) =>
         val lastUpdateMillis = lastUpdateMillisOption.getOrElse(0L)
@@ -233,24 +374,24 @@ class KafkaStateActor(curator: CuratorFramework,
           }
         } // else no updates to send
 
+      case KSGetAllConsumerDescriptions(lastUpdateMillisOption) =>
+        val lastUpdateMillis = lastUpdateMillisOption.getOrElse(0L)
+        if (consumersTreeCacheLastUpdateMillis > lastUpdateMillis) {
+          //we have option here since there may be no consumers
+          withConsumersTreeCache {  cache: TreeCache =>
+            cache.getCurrentChildren(ZkUtils.ConsumersPath)
+          }.fold {
+            sender ! ConsumerDescriptions(IndexedSeq.empty, consumersTreeCacheLastUpdateMillis)
+          } { data: java.util.Map[String, ChildData] =>
+            sender ! ConsumerDescriptions(data.asScala.keys.toIndexedSeq.map(getConsumerDescription).flatten, consumersTreeCacheLastUpdateMillis)
+          }
+        }
+
       case KSGetTopicsLastUpdateMillis =>
         sender ! topicsTreeCacheLastUpdateMillis
 
       case KSGetBrokers =>
-        val data: mutable.Buffer[ChildData] = brokersPathCache.getCurrentData.asScala
-        val result: IndexedSeq[BrokerIdentity] = data.map { cd =>
-          BrokerIdentity.from(nodeFromPath(cd.getPath).toInt, asString(cd.getData))
-        }.filter { v =>
-          v match {
-            case scalaz.Failure(nel) =>
-              log.error(s"Failed to parse broker config $nel")
-              false
-            case _ => true
-          }
-        }.collect { 
-          case scalaz.Success(bi) => bi
-        }.toIndexedSeq.sortBy(_.id)
-        sender ! BrokerList(result, clusterConfig)
+        sender ! BrokerList(getBrokers, clusterConfig)
 
       case KSGetPreferredLeaderElection =>
         sender ! preferredLeaderElection
@@ -327,6 +468,10 @@ class KafkaStateActor(curator: CuratorFramework,
 
   private[this] def withTopicsTreeCache[T](fn: TreeCache => T) : Option[T] = {
     Option(fn(topicsTreeCache))
+  }
+
+  private[this] def withConsumersTreeCache[T](fn: TreeCache => T) : Option[T] = {
+    Option(fn(consumersTreeCache))
   }
 
 }

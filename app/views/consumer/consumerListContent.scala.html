@@ -1,0 +1,29 @@
+@*
+* Copyright 2015 Yahoo Inc. Licensed under the Apache License, Version 2.0
+* See accompanying LICENSE file.
+*@
+@(cluster: String, consumers: IndexedSeq[(String, Option[kafka.manager.ActorModel.ConsumerIdentity])])
+
+<table class="table" id="consumer-table">
+    <thead>
+    <tr><th>Consumer</th>
+        <th>Topics it consumes from</th>
+    </tr>
+    </thead>
+    <tbody>
+    @for( (consumer, consumerIdentityOpt) <- consumers) {
+        <tr>
+            <td><a href="@routes.Consumer.consumer(cluster,consumer)">@consumer</a></td>
+            <td>
+                @consumerIdentityOpt.fold{
+                    No details available for this consumer at this time
+                }{ a:kafka.manager.ActorModel.ConsumerIdentity =>
+                    @for(topic : String <- a.topicMap.keys) {
+                        <a href="@routes.Consumer.consumerAndTopic(cluster,consumer,topic)">@topic,  </a>
+                    }
+                }
+            </td>
+        </tr>
+    }
+    </tbody>
+</table>

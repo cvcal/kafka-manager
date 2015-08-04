@@ -3,7 +3,12 @@
 * See accompanying LICENSE file.
 *@
 @import b3.vertical.fieldConstructor
-@(cluster:String,topic: String, topicIdentity: kafka.manager.ActorModel.TopicIdentity)
+@import scalaz.{\/}
+@(cluster:String,
+  topic: String,
+  topicIdentity: kafka.manager.ActorModel.TopicIdentity,
+  consumerList: Iterable[String]
+)
 
 @getUnderReplicatedLevel(percentage: Int) = {
     @percentage match {
@@ -86,6 +91,10 @@
                     <tr>
                         <td>Number of Partitions</td>
                         <td>@topicIdentity.partitions</td>
+                    </tr>
+                    <tr>
+                        <td>Sum of partition offsets</td>
+                        <td>@topicIdentity.summedTopicOffsets</td>
                     </tr>
                     <tr>
                         <td>Total number of Brokers</td>
@@ -184,7 +193,7 @@
             </div>
             <div class="panel panel-default">
                 <div class="panel-heading"><h4>Partitions by Broker</h4></div>
-                <table class="table">
+                <table class="table" style="table-layout: fixed; width: 100%">
                     <thead>
                     <tr><th>Broker</th><th># of Partitions</th><th>Partitions</th><th>Skewed?</th></tr>
                     </thead>
@@ -193,10 +202,22 @@
                     <tr>
                         <td><a href="@routes.Application.broker(cluster,btp.id)">@btp.id</a></td>
                         <td>@btp.partitions.size</td>
-                        <td>@btp.partitions.mkString("(",",",")")</td>
+                        <td style="word-wrap: break-word">@btp.partitions.mkString("(",",",")")</td>
                         <td class="@getBrokerIsSkewedLevel(btp.isSkewed)">
                             @btp.isSkewed
                         </td>
+                    </tr>
+                    }
+                    </tbody>
+                </table>
+            </div>
+            <div class="panel panel-default">
+                <div class="panel-heading"><h4>Consumers consuming from this topic</h4></div>
+                <table class="table">
+                    <tbody>
+                    @for(c:String <- consumerList) {
+                    <tr>
+                        <td><a href="@routes.Consumer.consumerAndTopic(cluster,c,topic)">@c</a></td>
                     </tr>
                     }
                     </tbody>
@@ -210,17 +231,18 @@
                 <div class="panel-heading"><h4>Partition Information</h4></div>
                 <table class="table">
                     <thead>
-                    <tr><th>Partition</th><th>Leader</th><th>Replicas</th><th>In Sync Replicas</th><th>Preferred Leader?</th><th>Under Replicated?</th></tr>
+                    <tr><th>Partition</th><th>Latest Offset</th><th>Leader</th><th>Replicas</th><th>In Sync Replicas</th><th>Preferred Leader?</th><th>Under Replicated?</th></tr>
                     </thead>
                     <tbody>
                     @for((_,tpi) <- topicIdentity.partitionsIdentity.toIndexedSeq.sortBy(_._2.partNum)) {
                     <tr>
                         <td>@tpi.partNum</td>
+                        <td>@tpi.latestOffset.getOrElse(" ")</td>
                         <td class="@getPartitionLeaderLevel(tpi.leader)">
                             <a href="@routes.Application.broker(cluster,tpi.leader)">@tpi.leader</a>
                         </td>
-                        <td>@tpi.replicas.mkString("(",",",")")</td>
-                        <td>@tpi.isr.mkString("(",",",")")</td>
+                        <td style="word-wrap: break-word">@tpi.replicas.mkString("(", ",", ")")</td>
+                        <td style="word-wrap: break-word">@tpi.isr.mkString("(", ",", ")")</td>
                         <td class="@getIsPreferredLeaderLevel(tpi.isPreferredLeader)">
                             @tpi.isPreferredLeader
                         </td>

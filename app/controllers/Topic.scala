@@ -9,7 +9,7 @@ import java.util.Properties
 
 import kafka.manager.ActorModel.TopicIdentity
 import kafka.manager.utils.TopicConfigs
-import kafka.manager.{Kafka_0_8_2_1, ApiError, Kafka_0_8_2_0, Kafka_0_8_1_1}
+import kafka.manager.{Kafka_0_8_2_1, ApiError, Kafka_0_8_2_0, Kafka_0_8_1_1, TopicListExtended}
 import models.FollowLink
 import models.form._
 import models.navigation.Menus
@@ -79,6 +79,31 @@ object Topic extends Controller{
     )(AddTopicPartitions.apply)(AddTopicPartitions.unapply)
   )
 
+  val defaultAddMultipleTopicsPartitionsForm = Form(
+    mapping(
+      "topics" -> seq {
+        mapping(
+          "name" -> nonEmptyText,
+          "selected" -> boolean
+        )(TopicSelect.apply)(TopicSelect.unapply)
+      },
+      "brokers" -> seq {
+        mapping(
+          "id" -> number(min = 0),
+          "host" -> nonEmptyText,
+          "selected" -> boolean
+        )(BrokerSelect.apply)(BrokerSelect.unapply)
+      },
+      "partitions" -> number(min = 1, max = 10000),
+      "readVersions" -> seq {
+        mapping(
+          "topic" -> nonEmptyText,
+          "version" -> number(min = 0)
+        )(ReadVersion.apply)(ReadVersion.unapply)
+      }
+    )(AddMultipleTopicsPartitions.apply)(AddMultipleTopicsPartitions.unapply)
+  )
+
   val defaultUpdateConfigForm = Form(
     mapping(
       "topic" -> nonEmptyText.verifying(maxLength(250), validateName),
@@ -111,8 +136,11 @@ object Topic extends Controller{
   }
 
   def topic(c: String, t: String) = Action.async {
-    kafkaManager.getTopicIdentity(c,t).map { errorOrTopicIdentity =>
-      Ok(views.html.topic.topicView(c,t,errorOrTopicIdentity))
+    val futureErrorOrTopicIdentity = kafkaManager.getTopicIdentity(c,t)
+    val futureErrorOrConsumerList = kafkaManager.getConsumersForTopic(c,t)
+
+    futureErrorOrTopicIdentity.zip(futureErrorOrConsumerList).map {case (errorOrTopicIdentity,errorOrConsumerList) =>
+      Ok(views.html.topic.topicView(c,t,errorOrTopicIdentity,errorOrConsumerList))
     }
   }
 
@@ -148,7 +176,8 @@ object Topic extends Controller{
         BadRequest(views.html.topic.topicView(
           clusterName,
           topic,
-          -\/(ApiError(formWithErrors.error("topic").map(_.toString).getOrElse("Unknown error deleting topic!")))))),
+          -\/(ApiError(formWithErrors.error("topic").map(_.toString).getOrElse("Unknown error deleting topic!"))),
+          None))),
       deleteTopic => {
         kafkaManager.deleteTopic(clusterName,deleteTopic.topic).map { errorOrSuccess =>
           Ok(views.html.common.resultOfCommand(
@@ -179,6 +208,26 @@ object Topic extends Controller{
     }
   }
 
+  def addPartitionsToMultipleTopics(clusterName: String) = Action.async { implicit request =>
+    val errorOrFormFuture = kafkaManager.getTopicListExtended(clusterName).flatMap { errorOrTle =>
+      errorOrTle.fold( e => Future.successful(-\/(e)),{ topicListExtended =>
+        kafkaManager.getBrokerList(clusterName).map { errorOrBrokerList =>
+          errorOrBrokerList.map { bl =>
+            val tl = kafkaManager.topicListSortedByNumPartitions(topicListExtended)
+            val topics = tl.map(t => t._1).map(t => TopicSelect.from(t))
+            // default value is the largest number of partitions among existing topics with topic identity
+            val partitions = tl.head._2.map(_.partitions).getOrElse(0)
+            val readVersions = tl.map(t => t._2).flatMap(t => t).map(ti => ReadVersion(ti.topic, ti.readVersion))
+            defaultAddMultipleTopicsPartitionsForm.fill(AddMultipleTopicsPartitions(topics,bl.list.map(bi => BrokerSelect.from(bi)),partitions,readVersions))
+          }
+        }
+      })
+    }
+    errorOrFormFuture.map { errorOrForm =>
+      Ok(views.html.topic.addPartitionsToMultipleTopics(clusterName, errorOrForm))
+    }
+  }
+
   def handleAddPartitions(clusterName: String, topic: String) = Action.async { implicit request =>
     defaultAddPartitionsForm.bindFromRequest.fold(
       formWithErrors => Future.successful(BadRequest(views.html.topic.addPartitions(clusterName, topic,\/-(formWithErrors)))),
@@ -191,6 +240,27 @@ object Topic extends Controller{
             "Add Partitions",
             FollowLink("Go to topic view.",routes.Topic.topic(clusterName, addTopicPartitions.topic).toString()),
             FollowLink("Try again.",routes.Topic.addPartitions(clusterName, topic).toString())
+          ))
+        }
+      }
+    )
+  }
+
+  def handleAddPartitionsToMultipleTopics(clusterName: String) = Action.async { implicit request =>
+    defaultAddMultipleTopicsPartitionsForm.bindFromRequest.fold(
+      formWithErrors => Future.successful(BadRequest(views.html.topic.addPartitionsToMultipleTopics(clusterName, \/-(formWithErrors)))),
+      addMultipleTopicsPartitions => {
+        val topics = addMultipleTopicsPartitions.topics.filter(_.selected).map(_.name)
+        val brokers = addMultipleTopicsPartitions.brokers.filter(_.selected).map(_.id)
+        val readVersions = addMultipleTopicsPartitions.readVersions.map{ rv => (rv.topic, rv.version) }.toMap
+        kafkaManager.addMultipleTopicsPartitions(clusterName, topics, brokers, addMultipleTopicsPartitions.partitions, readVersions).map { errorOrSuccess =>
+          Ok(views.html.common.resultOfCommand(
+            views.html.navigation.clusterMenu(clusterName,"Topics","Add Partitions to Multiple Topics",Menus.clusterMenus(clusterName)),
+            models.navigation.BreadCrumbs.withNamedViewAndCluster("Topics",clusterName,"Add Partitions to Multiple Topics"),
+            errorOrSuccess,
+            "Add Partitions to All Topics",
+            FollowLink("Go to topic list.",routes.Topic.topics(clusterName).toString()),
+            FollowLink("Try again.",routes.Topic.addPartitionsToMultipleTopics(clusterName).toString())
           ))
         }
       }

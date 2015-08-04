@@ -11,9 +11,11 @@ import java.util.concurrent.{LinkedBlockingQueue, TimeUnit, ThreadPoolExecutor}
 import akka.actor.{ActorPath, ActorSystem, Props}
 import akka.util.Timeout
 import com.typesafe.config.{ConfigFactory, Config}
+import controllers.Topic
 import kafka.manager.ActorModel._
 import org.slf4j.{LoggerFactory, Logger}
 
+import scala.collection.mutable
 import scala.concurrent.{ExecutionContext, Future}
 import scala.concurrent.duration._
 import scala.reflect.ClassTag
@@ -22,8 +24,16 @@ import scala.util.{Success, Failure, Try}
 /**
  * @author hiral
  */
-case class TopicListExtended(list: IndexedSeq[(String, Option[TopicIdentity])], deleteSet: Set[String], underReassignments: IndexedSeq[String])
-case class BrokerListExtended(list: IndexedSeq[BrokerIdentity], metrics: Map[Int,BrokerMetrics], combinedMetric: Option[BrokerMetrics], clusterConfig: ClusterConfig)
+case class TopicListExtended(list: IndexedSeq[(String, Option[TopicIdentity])],
+                             topicToConsumerMap: Map[String, Iterable[String]],
+                             deleteSet: Set[String],
+                             underReassignments: IndexedSeq[String])
+case class ConsumerListExtended(list: IndexedSeq[(String, Option[ConsumerIdentity])])
+case class BrokerListExtended(list: IndexedSeq[BrokerIdentity],
+                              metrics: Map[Int,BrokerMetrics],
+                              combinedMetric: Option[BrokerMetrics],
+                              clusterConfig: ClusterConfig)
+
 case class ApiError(msg: String)
 object ApiError {
   private[this] val log : Logger = LoggerFactory.getLogger(classOf[ApiError])
@@ -217,6 +227,28 @@ class KafkaManager(akkaConfig: Config)
     }
   }
 
+  def manualPartitionAssignments( clusterName: String,
+                                  assignments: List[(String, List[(Int, List[Int])])]) = {
+    implicit val ec = apiExecutionContext
+    val results = tryWithKafkaManagerActor(
+      KMClusterCommandRequest (
+        clusterName,
+        CMManualPartitionAssignments(assignments)
+      )
+    ) { result: CMCommandResults =>
+      val errors = result.result.collect { case Failure(t) => ApiError(t.getMessage)}
+      if (errors.isEmpty)
+        \/-({})
+      else
+        -\/(errors)
+    }
+
+    results.map {
+      case -\/(e) => -\/(IndexedSeq(e))
+      case \/-(lst) => lst
+    }
+  }
+
   def generatePartitionAssignments(
                                     clusterName: String,
                                     topics: Set[String],
@@ -302,6 +334,34 @@ class KafkaManager(akkaConfig: Config)
     }
   }
 
+  def addMultipleTopicsPartitions(
+                              clusterName: String,
+                              topics: Seq[String],
+                              brokers: Seq[Int],
+                              partitions: Int,
+                              readVersions: Map[String, Int]
+                              ): Future[ApiError \/ Unit] =
+  {
+    implicit val ec = apiExecutionContext
+    getTopicListExtended(clusterName).flatMap { tleOrError =>
+      tleOrError.fold(
+      e => Future.successful(-\/(e)), { tle =>
+        // add partitions to only topics with topic identity
+        val topicsAndReplicas = topicListSortedByNumPartitions(tle).filter(t => topics.contains(t._1) && t._2.nonEmpty).map{ case (t,i) => (t, i.get.partitionsIdentity.mapValues(_.replicas)) }
+        withKafkaManagerActor(
+          KMClusterCommandRequest(
+            clusterName,
+            CMAddMultipleTopicsPartitions(topicsAndReplicas, brokers, partitions, readVersions)
+          )
+        ) {
+          result: Future[CMCommandResult] =>
+            result.map(cmr => toDisjunction(cmr.result))
+        }
+      }
+      )
+    }
+  }
+
   def updateTopicConfig(
                          clusterName: String,
                          topic: String,
@@ -353,21 +413,44 @@ class KafkaManager(akkaConfig: Config)
   }
 
   def getTopicListExtended(clusterName: String): Future[ApiError \/ TopicListExtended] = {
-    val futureTopicIdentities = tryWithKafkaManagerActor(KMClusterQueryRequest(clusterName, BVGetTopicIdentities))(identity[Map[String, TopicIdentity]])
+    val futureTopicIdentities = tryWithKafkaManagerActor(KMClusterQueryRequest(clusterName, BVGetTopicIdentities))(
+      identity[Map[String, TopicIdentity]])
     val futureTopicList = tryWithKafkaManagerActor(KMClusterQueryRequest(clusterName, KSGetTopics))(identity[TopicList])
+    val futureTopicToConsumerMap = tryWithKafkaManagerActor(KMClusterQueryRequest(clusterName, BVGetTopicConsumerMap))(
+      identity[Map[String, Iterable[String]]])
     val futureTopicsReasgn = getTopicsUnderReassignment(clusterName)
     implicit val ec = apiExecutionContext
     for {
       errOrTi <- futureTopicIdentities
       errOrTl <- futureTopicList
+      errOrTCm <- futureTopicToConsumerMap
       errOrRap <- futureTopicsReasgn
     } yield {
       for {
         ti <- errOrTi
         tl <- errOrTl
+        tcm <- errOrTCm
         rap <- errOrRap
       } yield {
-        TopicListExtended(tl.list.map(t => (t, ti.get(t))), tl.deleteSet, rap)
+        TopicListExtended(tl.list.map(t => (t, ti.get(t))).sortBy(_._1), tcm, tl.deleteSet, rap)
+      }
+    }
+  }
+
+  def getConsumerListExtended(clusterName: String): Future[ApiError \/ ConsumerListExtended] = {
+    val futureConsumerIdentities = tryWithKafkaManagerActor(KMClusterQueryRequest(clusterName, BVGetConsumerIdentities))(
+      identity[Map[String, ConsumerIdentity]])
+    val futureConsumerList = tryWithKafkaManagerActor(KMClusterQueryRequest(clusterName, KSGetConsumers))(identity[ConsumerList])
+    implicit val ec = apiExecutionContext
+    for {
+      errorOrCI <- futureConsumerIdentities
+      errorOrCL <- futureConsumerList
+    } yield {
+      for {
+        ci <- errorOrCI
+        cl <- errorOrCL
+      } yield {
+        ConsumerListExtended(cl.list.map(c => (c, ci.get(c))))
       }
     }
   }
@@ -410,6 +493,17 @@ class KafkaManager(akkaConfig: Config)
         }
       })
     }
+  }
+
+  def getBrokersView(clusterName: String): Future[\/[ApiError, Seq[BVView]]] = {
+    implicit val ec = apiExecutionContext
+
+    tryWithKafkaManagerActor(
+      KMClusterQueryRequest(
+        clusterName,
+        BVGetViews
+      )
+    )(identity[Seq[BVView]])
   }
 
   def getBrokerView(clusterName: String, brokerId: Int): Future[ApiError \/ BVView] = {
@@ -460,7 +554,64 @@ class KafkaManager(akkaConfig: Config)
     }
   }
 
-  def getTopicMetrics(clusterName: String, topic: String): Future[ApiError \/ Option[BrokerMetrics]] = {
+  def getConsumersForTopic(clusterName: String, topic: String): Future[Option[Iterable[String]]] = {
+    val futureTopicConsumerMap = tryWithKafkaManagerActor(KMClusterQueryRequest(clusterName, BVGetTopicConsumerMap))(
+      identity[Map[String, Iterable[String]]])
+    implicit val ec = apiExecutionContext
+    futureTopicConsumerMap.map[Option[Iterable[String]]] { errOrTCM =>
+      errOrTCM.fold[Option[Iterable[String]]] (_ => None, _.get(topic))
+    }
+  }
+
+  def getConsumerIdentity(clusterName: String, consumer: String): Future[ApiError \/ ConsumerIdentity] = {
+    val futureCMConsumerIdentity = tryWithKafkaManagerActor(KMClusterQueryRequest(clusterName, CMGetConsumerIdentity(consumer)))(
+      identity[Option[CMConsumerIdentity]]
+    )
+    implicit val ec = apiExecutionContext
+    futureCMConsumerIdentity.map[ApiError \/ ConsumerIdentity] { errOrCI =>
+      errOrCI.fold[ApiError \/ ConsumerIdentity](
+      { err: ApiError =>
+        -\/[ApiError](err)
+      }, { ciOption: Option[CMConsumerIdentity] =>
+        ciOption.fold[ApiError \/ ConsumerIdentity] {
+          -\/(ApiError(s"Consumer not found $consumer for cluster $clusterName"))
+        } { cmConsumerIdentity =>
+          cmConsumerIdentity.consumerIdentity match {
+            case scala.util.Failure(c) =>
+              -\/[ApiError](c)
+            case scala.util.Success(ci) =>
+              \/-(ci)
+          }
+        }
+      }
+      )
+    }
+  }
+
+  def getConsumedTopicState(clusterName: String, consumer: String, topic: String): Future[ApiError \/ ConsumedTopicState] = {
+    val futureCMConsumedTopic = tryWithKafkaManagerActor(KMClusterQueryRequest(clusterName, CMGetConsumedTopicState(consumer,topic)))(
+      identity[CMConsumedTopic]
+    )
+    implicit val ec = apiExecutionContext
+    futureCMConsumedTopic.map[ApiError \/ ConsumedTopicState] { errOrCT =>
+      errOrCT.fold[ApiError \/ ConsumedTopicState](
+      { err: ApiError =>
+        -\/[ApiError](err)
+      }, { cmConsumedTopic: CMConsumedTopic =>
+          cmConsumedTopic.ctIdentity match {
+            case scala.util.Failure(c) =>
+              -\/[ApiError](c)
+            case scala.util.Success(ci) =>
+              \/-(ci)
+          }
+        }
+      )
+    }
+  }
+
+
+
+    def getTopicMetrics(clusterName: String, topic: String): Future[ApiError \/ Option[BrokerMetrics]] = {
     tryWithKafkaManagerActor(
       KMClusterQueryRequest(
         clusterName,
@@ -487,5 +638,18 @@ class KafkaManager(akkaConfig: Config)
         KSGetReassignPartition
       )
     )(identity[Option[ReassignPartitions]])
+  }
+
+  def topicListSortedByNumPartitions(tle: TopicListExtended): Seq[(String, Option[TopicIdentity])] = {
+    def partition(tiOption: Option[TopicIdentity]): Int = {
+      tiOption match {
+        case Some(ti) => ti.partitions
+        case None => 0
+      }
+    }
+    val sortedByNumPartition = tle.list.sortWith{ (leftE, rightE) =>
+      partition(leftE._2) > partition(rightE._2)
+    }
+    sortedByNumPartition
   }
 }
