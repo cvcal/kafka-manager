@@ -11,6 +11,7 @@ import org.joda.time.DateTime
 import kafka.common.TopicAndPartition
 import org.slf4j.LoggerFactory
 
+import scala.collection.immutable.Queue
 import scala.util.Try
 import scalaz.{NonEmptyList, Validation}
 
@@ -41,6 +42,7 @@ object ActorModel {
   case object BVGetBrokerMetrics extends BVRequest
   case class BVView(topicPartitions: Map[TopicIdentity, IndexedSeq[Int]], clusterConfig: ClusterConfig,
                     metrics: Option[BrokerMetrics] = None,
+                    messagesPerSecCountHistory: Option[Queue[BrokerMessagesPerSecCount]] = None,
                     stats: Option[BrokerClusterStats] = None) extends QueryResponse {
     def numTopics : Int = topicPartitions.size
     def numPartitions : Int = topicPartitions.values.foldLeft(0)((acc,i) => acc + i.size)
@@ -66,6 +68,10 @@ object ActorModel {
                                   partitions: Int,
                                   partitionReplicaList: Map[Int, Seq[Int]],
                                   readVersion: Int) extends CommandRequest
+  case class CMAddMultipleTopicsPartitions(topicsAndReplicas: Seq[(String, Map[Int, Seq[Int]])],
+                                           brokers: Seq[Int],
+                                           partitions: Int,
+                                           readVersions: Map[String,Int]) extends CommandRequest
   case class CMUpdateTopicConfig(topic: String, config: Properties, readVersion: Int) extends CommandRequest
   case class CMDeleteTopic(topic: String) extends CommandRequest
   case class CMRunPreferredLeaderElection(topics: Set[String]) extends CommandRequest
@@ -87,6 +93,10 @@ object ActorModel {
                            partitions: Int,
                            partitionReplicaList: Map[Int, Seq[Int]],
                            readVersion: Int) extends CommandRequest
+  case class KCAddMultipleTopicsPartitions(topicsAndReplicas: Seq[(String, Map[Int, Seq[Int]])],
+                                           brokers: Seq[Int],
+                                           partitions: Int,
+                                           readVersions: Map[String, Int]) extends CommandRequest
   case class KCUpdateTopicConfig(topic: String, config: Properties, readVersion: Int) extends CommandRequest
   case class KCDeleteTopic(topic: String) extends CommandRequest
   case class KCPreferredReplicaLeaderElection(topicAndPartition: Set[TopicAndPartition]) extends CommandRequest
@@ -420,6 +430,9 @@ object ActorModel {
                        clusterConfig)
     }
   }
+
+  case class BrokerMessagesPerSecCount(date: DateTime,
+                                       count: Long)
 
   case class BrokerMetrics(bytesInPerSec: MeterMetric,
                            bytesOutPerSec: MeterMetric,
