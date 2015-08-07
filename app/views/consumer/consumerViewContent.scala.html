@@ -25,8 +25,8 @@
                 @for((topic: String, state: kafka.manager.ActorModel.ConsumedTopicState) <- consumerIdentity.topicMap) {
                 <tr>
                     <td><a href="@routes.Consumer.consumerAndTopic(cluster, consumer, topic)">@topic</a></td>
-                    <td class="@getTopicCoverage(state.percentageCovered.getOrElse(100))">
-                        @state.percentageCovered.getOrElse("not available")
+                    <td class="@getTopicCoverage(state.percentageCovered)">
+                        @state.percentageCovered
                     </td>
                     <td>@state.totalLag.getOrElse("not available")</td>
                 </tr>

@@ -190,17 +190,6 @@ class ClusterManagerActor(cmConfig: ClusterManagerActorConfig)
         } yield ciO
         result pipeTo sender
 
-      case CMGetConsumedTopicState(consumer, topic) =>
-        implicit val ec = context.dispatcher
-        val eventualConsumedTopicDescription = withKafkaStateActor(
-          KSGetConsumedTopicDescription(consumer,topic)
-        )(identity[ConsumedTopicDescription])
-
-        val result: Future[CMConsumedTopic] = eventualConsumedTopicDescription.map{
-          ctd: ConsumedTopicDescription =>  CMConsumedTopic(Try(ConsumedTopicState.from(ctd)))
-        }
-        result pipeTo sender
-
       case any: Any => log.warning("cma : processQueryResponse : Received unknown message: {}", any)
     }
   }

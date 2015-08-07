@@ -17,7 +17,7 @@ import org.apache.zookeeper.data.Stat
 class TestCreateTopic extends CuratorAwareTest {
   
   private[this] val adminUtils  = new AdminUtils(Kafka_0_8_2_0)
-  private[this] val defaultClusterConfig = ClusterConfig("test","0.8.2.0","localhost:2818",100,false)
+  private[this] val defaultClusterConfig = ClusterConfig("test","0.8.2.0","localhost:2818",100,false,true)
 
   test("create topic with empty name") {
     checkError[TopicNameEmpty] {

@@ -5,6 +5,14 @@
 @import b3.vertical.fieldConstructor
 @(cluster:String, consumer: String, topic: String, state: kafka.manager.ActorModel.ConsumedTopicState)
 
+
+@getTopicCoverage(percentage: Int) = {
+    @percentage match {
+        case i if i > 50 && i<=75 => {warning}
+        case i if i <=  50 => {danger}
+        case i => {}
+    }
+}
 <div class="row">
     <div class="col-md-6">
         <div class="panel panel-default">
@@ -17,7 +25,7 @@
                 </tr>
                 <tr>
                     <td>% of Partitions assigned to a consumer instance</td>
-                    <td>@state.percentageCovered.getOrElse(" ")</td>
+                    <td class="@getTopicCoverage(state.percentageCovered)">@state.percentageCovered</td>
                 </tr>
                 </tbody>
             </table>
@@ -33,13 +41,13 @@
                 <tr><th>Partition</th><th>LogSize</th><th>Consumer Offset</th><th>Lag</th><th>Consumer Instance Owner</th></tr>
                 </thead>
                 <tbody>
-                @for(tp:Int <- 0 until state.partitionOwners.keys.max) {
+                @for(tp:Int <- 0 until state.numPartitions) {
                 <tr>
                     <td>@tp</td>
                     <td>@state.topicOffsets(tp).getOrElse(" ")</td>
-                    <td>@state.partitionOffsets(tp)</td>
+                    <td>@state.partitionOffsets.get(tp)</td>
                     <td>@state.partitionLag(tp).getOrElse(" ") </td>
-                    <td>@state.partitionOwners(tp)</td>
+                    <td>@state.partitionOwners.get(tp).getOrElse("None")</td>
                 </tr>
                 }
                 </tbody>

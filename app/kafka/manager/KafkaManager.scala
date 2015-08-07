@@ -179,19 +179,19 @@ class KafkaManager(akkaConfig: Config)
   }
 
   //--------------------Commands--------------------------
-  def addCluster(clusterName: String, version: String, zkHosts: String, jmxEnabled: Boolean): Future[ApiError \/
+  def addCluster(clusterName: String, version: String, zkHosts: String, jmxEnabled: Boolean, filterConsumers: Boolean): Future[ApiError \/
     Unit] =
   {
-    val cc = ClusterConfig(clusterName, version, zkHosts, jmxEnabled = jmxEnabled)
+    val cc = ClusterConfig(clusterName, version, zkHosts, jmxEnabled = jmxEnabled, filterConsumers = filterConsumers)
     tryWithKafkaManagerActor(KMAddCluster(cc)) { result: KMCommandResult =>
       result.result.get
     }
   }
 
-  def updateCluster(clusterName: String, version: String, zkHosts: String, jmxEnabled: Boolean): Future[ApiError \/
+  def updateCluster(clusterName: String, version: String, zkHosts: String, jmxEnabled: Boolean, filterConsumers: Boolean): Future[ApiError \/
     Unit] =
   {
-    val cc = ClusterConfig(clusterName, version, zkHosts, jmxEnabled = jmxEnabled)
+    val cc = ClusterConfig(clusterName, version, zkHosts, jmxEnabled = jmxEnabled,filterConsumers = filterConsumers)
     tryWithKafkaManagerActor(KMUpdateCluster(cc)) { result: KMCommandResult =>
       result.result.get
     }
@@ -589,20 +589,19 @@ class KafkaManager(akkaConfig: Config)
   }
 
   def getConsumedTopicState(clusterName: String, consumer: String, topic: String): Future[ApiError \/ ConsumedTopicState] = {
-    val futureCMConsumedTopic = tryWithKafkaManagerActor(KMClusterQueryRequest(clusterName, CMGetConsumedTopicState(consumer,topic)))(
-      identity[CMConsumedTopic]
+    val futureConsumedTopic = tryWithKafkaManagerActor(KMClusterQueryRequest(clusterName, KSGetConsumedTopicState(consumer,topic)))(
+      identity[Option[ConsumedTopicState]]
     )
     implicit val ec = apiExecutionContext
-    futureCMConsumedTopic.map[ApiError \/ ConsumedTopicState] { errOrCT =>
+    futureConsumedTopic.map[ApiError \/ ConsumedTopicState] { errOrCT =>
       errOrCT.fold[ApiError \/ ConsumedTopicState](
-      { err: ApiError =>
-        -\/[ApiError](err)
-      }, { cmConsumedTopic: CMConsumedTopic =>
-          cmConsumedTopic.ctIdentity match {
-            case scala.util.Failure(c) =>
-              -\/[ApiError](c)
-            case scala.util.Success(ci) =>
-              \/-(ci)
+        { err: ApiError =>
+          -\/[ApiError](err)
+        }, { ctOption: Option[ConsumedTopicState] =>
+          ctOption.fold[ApiError \/ ConsumedTopicState] {
+            -\/(ApiError(s"Consumer not found $consumer for cluster $clusterName"))
+          } { cts: ConsumedTopicState =>
+            \/-(cts)
           }
         }
       )

@@ -214,25 +214,43 @@ class KafkaStateActor(curator: CuratorFramework,
     result.map(cd => (cd.getStat.getVersion,asString(cd.getData)))
   }
 
+  def getConsumerList: ConsumerList = {
+    withConsumersTreeCache { cache =>
+      cache.getCurrentChildren(ZkUtils.ConsumersPath)
+    }.fold {
+      ConsumerList(IndexedSeq.empty)
+    } { data: java.util.Map[String, ChildData] =>
+      val filteredList: IndexedSeq[String] = data.asScala.filter{
+        case (consumer, childData) =>
+          if (clusterConfig.filterConsumers)
+            // Defining "inactive consumer" as a consumer that is missing one of three children ids/ offsets/ or owners/
+            childData.getStat.getNumChildren > 2
+          else true
+      }.keySet.toIndexedSeq
+      ConsumerList(filteredList)
+    }
+  }
+
   def getConsumerDescription(consumer: String) : Option[ConsumerDescription] = {
     val offsetPath = "%s/%s/%s".format(ZkUtils.ConsumersPath,consumer,"offsets")
     val topicOffsetOption : Option[Map[String, ChildData]] = Option(consumersTreeCache.getCurrentChildren(offsetPath)).map(_.asScala.toMap)
 
-
-    val topicDescriptions: Option[Map[String, ConsumedTopicDescription]] =
-      topicOffsetOption.map[List[(String, ConsumedTopicDescription)]] { topics: Map[String, ChildData] =>
-      for {
-        topicAndData: (String, ChildData) <- topics.toList
-        topicDesc = getConsumedTopicDescription(consumer, topicAndData._1)
-      } yield (topicAndData._1, topicDesc)
-    }.map(_.toMap)
+    val topicDescriptions: Option[Map[String, ConsumedTopicState]] =
+      topicOffsetOption.map[Map[String, ConsumedTopicState]] { _.keys map {
+          topic => (topic, getConsumedTopicState(consumer, topic))
+        } collect {
+          case (topic: String, Some(state: ConsumedTopicState)) => (topic, state)
+        } toMap
+      }
 
     topicDescriptions.map(ConsumerDescription(consumer, _))
   }
 
-  private[this] def getConsumedTopicDescription(consumer:String, topic:String) : ConsumedTopicDescription = {
+  private[this] def getConsumedTopicState(consumer:String, topic:String) : Option[ConsumedTopicState] = {
     val offsetPath = "%s/%s/%s/%s".format(ZkUtils.ConsumersPath, consumer, "offsets", topic)
     val ownerPath = "%s/%s/%s/%s".format(ZkUtils.ConsumersPath, consumer, "owners", topic)
+
+    // There might not be topics listed, so we have to take the Option into account
     val partitionOffsets: Option[Map[Int, Long]] = for {
       offsetsByPartition: Map[String, ChildData] <- Option(consumersTreeCache.getCurrentChildren(offsetPath)).map(_.asScala.toMap)
       offsets : Map[Int, Long] = offsetsByPartition map {case (part, data) => (part.toInt, asString(data.getData).toLong)}
@@ -243,8 +261,24 @@ class KafkaStateActor(curator: CuratorFramework,
       owners : Map[Int, String] = ownersByPartition map { case (part, data) => (part.toInt, asString(data.getData)) }
     } yield owners
 
-    val topicDescription = getTopicDescription(topic)
-    ConsumedTopicDescription(consumer, topic, topicDescription, partitionOwners, partitionOffsets)
+    val optTopic = getTopicDescription(topic)
+    val topicPartitionOffsets = optTopic.map(_.partitionOffsets).getOrElse(Map.empty[Int, Option[Long]])
+    // get number of partitions
+
+    val numPartitions: Int = math.max(optTopic.flatMap(_.partitionState.map(_.size)).getOrElse(0),
+                                      partitionOffsets.map(_.size).getOrElse(0))
+
+    // Only return a valid ConsumedTopicState if there is state associated with the topic under the consumer
+    if (partitionOffsets.isDefined || partitionOwners.isDefined) {
+      Some(ConsumedTopicState(consumer,
+                              topic,
+                              numPartitions,
+                              topicPartitionOffsets,
+                              partitionOwners.getOrElse(Map.empty),
+                              partitionOffsets.getOrElse(Map.empty)))
+    } else {
+      None
+    }
   }
 
   override def processActorResponse(response: ActorResponse): Unit = {
@@ -267,7 +301,6 @@ class KafkaStateActor(curator: CuratorFramework,
     val targetBrokers : IndexedSeq[Broker] = getBrokers.map(brokerIdentity2Broker)
     val time = -1
     val nOffsets = 1
-    val maxWaitMs = 1000
 
     // Get partition leader broker information
     import org.json4s.jackson.JsonMethods.parse
@@ -335,13 +368,7 @@ class KafkaStateActor(curator: CuratorFramework,
         }
 
       case KSGetConsumers =>
-        withConsumersTreeCache { cache =>
-            cache.getCurrentChildren(ZkUtils.ConsumersPath)
-        }.fold {
-          sender ! ConsumerList(IndexedSeq.empty)
-        } { data: java.util.Map[String, ChildData] =>
-          sender ! ConsumerList(data.asScala.keySet.toIndexedSeq)
-        }
+        sender ! getConsumerList
 
       case KSGetTopicConfig(topic) =>
         sender ! TopicConfig(topic, getTopicConfigString(topic))
@@ -350,16 +377,16 @@ class KafkaStateActor(curator: CuratorFramework,
         sender ! getTopicDescription(topic)
 
       case KSGetTopicDescriptions(topics) =>
-        sender ! TopicDescriptions(topics.toIndexedSeq.map(getTopicDescription).flatten, topicsTreeCacheLastUpdateMillis)
+        sender ! TopicDescriptions(topics.toIndexedSeq.flatMap(getTopicDescription), topicsTreeCacheLastUpdateMillis)
 
       case KSGetConsumerDescription(consumer) =>
         sender ! getConsumerDescription(consumer)
 
-      case KSGetConsumedTopicDescription(consumer, topic) =>
-        sender ! getConsumedTopicDescription(consumer,topic)
+      case KSGetConsumedTopicState(consumer, topic) =>
+        sender ! getConsumedTopicState(consumer,topic)
 
       case KSGetConsumerDescriptions(consumers) =>
-        sender ! ConsumerDescriptions(consumers.toIndexedSeq.map(getConsumerDescription).flatten, consumersTreeCacheLastUpdateMillis)
+        sender ! ConsumerDescriptions(consumers.toIndexedSeq.flatMap(getConsumerDescription), consumersTreeCacheLastUpdateMillis)
 
       case KSGetAllTopicDescriptions(lastUpdateMillisOption) =>
         val lastUpdateMillis = lastUpdateMillisOption.getOrElse(0L)
@@ -370,21 +397,14 @@ class KafkaStateActor(curator: CuratorFramework,
           }.fold {
             sender ! TopicDescriptions(IndexedSeq.empty, topicsTreeCacheLastUpdateMillis)
           } { data: java.util.Map[String, ChildData] =>
-            sender ! TopicDescriptions(data.asScala.keys.toIndexedSeq.map(getTopicDescription).flatten, topicsTreeCacheLastUpdateMillis)
+            sender ! TopicDescriptions(data.asScala.keys.toIndexedSeq.flatMap(getTopicDescription), topicsTreeCacheLastUpdateMillis)
           }
         } // else no updates to send
 
       case KSGetAllConsumerDescriptions(lastUpdateMillisOption) =>
         val lastUpdateMillis = lastUpdateMillisOption.getOrElse(0L)
         if (consumersTreeCacheLastUpdateMillis > lastUpdateMillis) {
-          //we have option here since there may be no consumers
-          withConsumersTreeCache {  cache: TreeCache =>
-            cache.getCurrentChildren(ZkUtils.ConsumersPath)
-          }.fold {
-            sender ! ConsumerDescriptions(IndexedSeq.empty, consumersTreeCacheLastUpdateMillis)
-          } { data: java.util.Map[String, ChildData] =>
-            sender ! ConsumerDescriptions(data.asScala.keys.toIndexedSeq.map(getConsumerDescription).flatten, consumersTreeCacheLastUpdateMillis)
-          }
+          sender ! ConsumerDescriptions(getConsumerList.list.flatMap(getConsumerDescription), consumersTreeCacheLastUpdateMillis)
         }
 
       case KSGetTopicsLastUpdateMillis =>

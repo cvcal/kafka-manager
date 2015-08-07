@@ -24,7 +24,7 @@ class TestReassignPartitions extends CuratorAwareTest {
 
   private[this] val brokerList = IndexedSeq(1,2,3)
 
-  private[this] val defaultClusterConfig = ClusterConfig("test","0.8.2.0","localhost:2818",100,false)
+  private[this] val defaultClusterConfig = ClusterConfig("test","0.8.2.0","localhost:2818",100,false,true)
   
   private[this] def mytopic1 : TopicIdentity = getTopicIdentity("mytopic1")
   private[this] def mytopic2 : TopicIdentity = getTopicIdentity("mytopic2")

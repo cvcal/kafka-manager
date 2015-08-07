@@ -53,7 +53,6 @@ object ActorModel {
   case object CMGetView extends QueryRequest
   case class CMGetTopicIdentity(topic: String) extends QueryRequest
   case class CMGetConsumerIdentity(consumer: String) extends QueryRequest
-  case class CMGetConsumedTopicState(consumer: String, topic: String) extends QueryRequest
   case class CMView(topicsCount: Int, brokersCount: Int, clusterConfig: ClusterConfig) extends QueryResponse
   case class CMTopicIdentity(topicIdentity: Try[TopicIdentity]) extends QueryResponse
   case class CMConsumerIdentity(consumerIdentity: Try[ConsumerIdentity]) extends QueryResponse
@@ -133,7 +132,7 @@ object ActorModel {
   case class KSGetAllTopicDescriptions(lastUpdateMillis: Option[Long]= None) extends KSRequest
   case class KSGetTopicDescriptions(topics: Set[String]) extends KSRequest
   case class KSGetConsumerDescription(consumer: String) extends KSRequest
-  case class KSGetConsumedTopicDescription(consumer: String, topic: String) extends KSRequest
+  case class KSGetConsumedTopicState(consumer: String, topic: String) extends KSRequest
   case class KSGetAllConsumerDescriptions(lastUpdateMillis: Option[Long]= None) extends KSRequest
   case class KSGetConsumerDescriptions(consumers: Set[String]) extends KSRequest
   case object KSGetTopicsLastUpdateMillis extends KSRequest
@@ -159,14 +158,8 @@ object ActorModel {
                               deleteSupported: Boolean) extends  QueryResponse
   case class TopicDescriptions(descriptions: IndexedSeq[TopicDescription], lastUpdateMillis: Long) extends QueryResponse
 
-  case class ConsumedTopicDescription(consumer: String,
-                                      topic: String,
-                                      topicDescription: Option[TopicDescription],
-                                      partitionOwners: Option[Map[Int, String]],
-                                      partitionOffsets: Option[Map[Int, Long]])
   case class ConsumerDescription(consumer: String,
-                                 topics: Map[String, ConsumedTopicDescription]) extends  QueryResponse
-
+                                 topics: Map[String, ConsumedTopicState]) extends  QueryResponse
   case class ConsumerDescriptions(descriptions: IndexedSeq[ConsumerDescription], lastUpdateMillis: Long) extends QueryResponse
 
   case class BrokerList(list: IndexedSeq[BrokerIdentity], clusterConfig: ClusterConfig) extends QueryResponse
@@ -371,13 +364,14 @@ object ActorModel {
 
   case class ConsumedTopicState(consumerGroup: String,
                                 topic: String,
+                                numPartitions: Int,
                                 partitionLatestOffsets: Map[Int, Option[Long]],
                                 partitionOwners: Map[Int, String],
-                                partitionOffsets: Map[Int, Long]) {
+                                partitionOffsets: Map[Int, Long]) extends QueryResponse {
     lazy val totalLag : Option[Long] = {
       // only defined if every partition has a latest offset
       val actualOffsets = partitionLatestOffsets.values.collect{case Some(x:Long) => x}
-      if (actualOffsets.size == partitionLatestOffsets.size) {
+      if (actualOffsets.size == numPartitions && partitionLatestOffsets.size == numPartitions) {
           Some(actualOffsets.sum - partitionOffsets.values.sum)
       } else None
     }
@@ -390,22 +384,12 @@ object ActorModel {
     }
 
     // Percentage of the partitions that have an owner
-    def percentageCovered : Option[Int] = {
-      if (partitionOwners.isEmpty) {
-        None
-      } else {
-        val numCovered = partitionOwners.size
-        val numPartitions = partitionOwners.keys.max+1
-        Some(100 * numCovered / numPartitions)
-      }
-    }
-  }
-  object ConsumedTopicState {
-    def from(ctd: ConsumedTopicDescription): ConsumedTopicState = {
-      val partitionOffsetsMap = ctd.partitionOffsets.getOrElse(Map.empty)
-      val partitionOwnersMap = ctd.partitionOwners.getOrElse(Map.empty)
-      val topicOffsetsOptMap = ctd.topicDescription.map(_.partitionOffsets).getOrElse(Map.empty)
-      ConsumedTopicState(ctd.consumer, ctd.topic, topicOffsetsOptMap, partitionOwnersMap, partitionOffsetsMap)
+    def percentageCovered : Int =
+    if (numPartitions != 0) {
+      val numCovered = partitionOwners.size
+      100 * numCovered / numPartitions
+    } else {
+      100 // if there are no partitions to cover, they are all covered!
     }
   }
 
@@ -413,22 +397,12 @@ object ActorModel {
                               topicMap: Map[String, ConsumedTopicState],
                               clusterConfig: ClusterConfig)
   object ConsumerIdentity {
-
     lazy val logger = LoggerFactory.getLogger(this.getClass)
-
     import scala.language.reflectiveCalls
 
     implicit def from(cd: ConsumerDescription,
+                      clusterConfig: ClusterConfig) : ConsumerIdentity = ConsumerIdentity(cd.consumer, cd.topics, clusterConfig)
 
-                      clusterConfig: ClusterConfig) : ConsumerIdentity = {
-      val topicMap: Seq[(String, ConsumedTopicState)] = for {
-        (topic, ctd) <- cd.topics.toSeq
-        cts = ConsumedTopicState.from(ctd)
-      } yield (topic, cts)
-      ConsumerIdentity(cd.consumer,
-                       topicMap.toMap,
-                       clusterConfig)
-    }
   }
 
   case class BrokerMessagesPerSecCount(date: DateTime,
