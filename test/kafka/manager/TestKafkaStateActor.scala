@@ -38,8 +38,8 @@ class TestKafkaStateActor extends KafkaServerInTest {
 
   override protected def beforeAll(): Unit = {
     super.beforeAll()
-    val props = Props(classOf[KafkaStateActor],sharedCurator, true, defaultClusterConfig)
-
+    val ksConfig = KafkaStateActorConfig(sharedCurator, true, defaultClusterConfig, LongRunningPoolConfig(2,100))
+    val props = Props(classOf[KafkaStateActor],ksConfig)
     kafkaStateActor = Some(system.actorOf(props.withDispatcher("pinned-dispatcher"),"ksa"))
   }
 

@@ -589,28 +589,27 @@ class KafkaManager(akkaConfig: Config)
   }
 
   def getConsumedTopicState(clusterName: String, consumer: String, topic: String): Future[ApiError \/ ConsumedTopicState] = {
-    val futureConsumedTopic = tryWithKafkaManagerActor(KMClusterQueryRequest(clusterName, KSGetConsumedTopicState(consumer,topic)))(
-      identity[Option[ConsumedTopicState]]
+    val futureCMConsumedTopic = tryWithKafkaManagerActor(KMClusterQueryRequest(clusterName, CMGetConsumedTopicState(consumer,topic)))(
+      identity[CMConsumedTopic]
     )
     implicit val ec = apiExecutionContext
-    futureConsumedTopic.map[ApiError \/ ConsumedTopicState] { errOrCT =>
+    futureCMConsumedTopic.map[ApiError \/ ConsumedTopicState] { errOrCT =>
       errOrCT.fold[ApiError \/ ConsumedTopicState](
-        { err: ApiError =>
-          -\/[ApiError](err)
-        }, { ctOption: Option[ConsumedTopicState] =>
-          ctOption.fold[ApiError \/ ConsumedTopicState] {
-            -\/(ApiError(s"Consumer not found $consumer for cluster $clusterName"))
-          } { cts: ConsumedTopicState =>
-            \/-(cts)
-          }
+      { err: ApiError =>
+        -\/[ApiError](err)
+      }, { cmConsumedTopic: CMConsumedTopic =>
+        cmConsumedTopic.ctIdentity match {
+          case scala.util.Failure(c) =>
+            -\/[ApiError](c)
+          case scala.util.Success(ci) =>
+            \/-(ci)
         }
+      }
       )
     }
   }
 
-
-
-    def getTopicMetrics(clusterName: String, topic: String): Future[ApiError \/ Option[BrokerMetrics]] = {
+  def getTopicMetrics(clusterName: String, topic: String): Future[ApiError \/ Option[BrokerMetrics]] = {
     tryWithKafkaManagerActor(
       KMClusterQueryRequest(
         clusterName,
