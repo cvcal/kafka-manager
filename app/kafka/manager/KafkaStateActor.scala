@@ -5,8 +5,6 @@
 
 package kafka.manager
 
-import java.util.concurrent.{LinkedBlockingQueue, TimeUnit, ThreadPoolExecutor}
-
 import kafka.api.{PartitionOffsetRequestInfo, OffsetRequest}
 import kafka.consumer.SimpleConsumer
 import kafka.cluster.Broker
@@ -17,12 +15,9 @@ import org.apache.curator.framework.recipes.cache.PathChildrenCache.StartMode
 import org.apache.curator.framework.recipes.cache._
 import org.apache.curator.framework.CuratorFramework
 import org.joda.time.{DateTimeZone, DateTime}
-import com.typesafe.config.Config
-import play.api.Play.current
 
 import scala.collection.mutable
-import scala.concurrent.{ExecutionContext, Future}
-import scala.concurrent.duration._
+import scala.concurrent.Future
 import scala.util.{Success, Failure, Try}
 
 /**
@@ -43,27 +38,6 @@ class KafkaStateActor(config: KafkaStateActorConfig) extends BaseQueryCommandAct
   override protected def longRunningQueueFull(): Unit = {
     log.error("Long running pool queue full, skipping!")
   }
-
-//  // execution context like the one from kafkaManager, for futures in making calls to Kafka and not curator
-//  private[this] lazy val akkaConfig: Config = play.api.Play.configuration.underlying
-//  private[this] lazy val configWithDefaults = akkaConfig.withFallback(KafkaManager.DefaultConfig)
-//  private[this] lazy val kafkaStateActorConfig = {
-//    val curatorConfig = CuratorConfig(configWithDefaults.getString(KafkaManager.ZkHosts))
-//    KafkaManagerActorConfig(
-//      curatorConfig = curatorConfig,
-//      threadPoolSize = configWithDefaults.getInt(KafkaManager.ThreadPoolSize),
-//      maxQueueSize = configWithDefaults.getInt(KafkaManager.MaxQueueSize)
-//    )
-//  }
-//  private[this] lazy val executor = new ThreadPoolExecutor(
-//    kafkaStateActorConfig.threadPoolSize,
-//    kafkaStateActorConfig.threadPoolSize,
-//    0L,
-//    TimeUnit.MILLISECONDS,
-//    new LinkedBlockingQueue[Runnable](kafkaStateActorConfig.maxQueueSize)
-//  )
-//  private[this] lazy val apiExecutionContext = ExecutionContext.fromExecutor(executor)
-
 
   // e.g. /brokers/topics/analytics_content/partitions/0/state
   private[this] val topicsTreeCache = new TreeCache(config.curator,ZkUtils.BrokerTopicsPath)
@@ -301,42 +275,6 @@ class KafkaStateActor(config: KafkaStateActorConfig) extends BaseQueryCommandAct
     ConsumedTopicDescription(consumer, topic, numPartitions, optTopic, partitionOwners, partitionOffsets)
   }
 
-
-  /*private[this] def getConsumedTopicState(consumer:String, topic:String) : Option[ConsumedTopicState] = { // TODO REMOVE
-    val offsetPath = "%s/%s/%s/%s".format(ZkUtils.ConsumersPath, consumer, "offsets", topic)
-    val ownerPath = "%s/%s/%s/%s".format(ZkUtils.ConsumersPath, consumer, "owners", topic)
-
-    // There might not be topics listed, so we have to take the Option into account
-    val partitionOffsets: Option[Map[Int, Long]] = for {
-      offsetsByPartition: Map[String, ChildData] <- Option(consumersTreeCache.getCurrentChildren(offsetPath)).map(_.asScala.toMap)
-      offsets : Map[Int, Long] = offsetsByPartition map {case (part, data) => (part.toInt, asString(data.getData).toLong)}
-    } yield offsets
-
-    val partitionOwners: Option[Map[Int, String]] = for {
-      ownersByPartition: Map[String, ChildData] <- Option(consumersTreeCache.getCurrentChildren(ownerPath)).map(_.asScala.toMap)
-      owners : Map[Int, String] = ownersByPartition map { case (part, data) => (part.toInt, asString(data.getData)) }
-    } yield owners
-
-    val optTopic = getTopicDescription(topic)
-    val topicPartitionOffsets: Map[Int, Future[Long]] = optTopic.map(_.partitionOffsets).getOrElse(Map.empty[Int, Future[Long]])
-    // get number of partitions
-
-    val numPartitions: Int = math.max(optTopic.flatMap(_.partitionState.map(_.size)).getOrElse(0),
-                                      partitionOffsets.map(_.size).getOrElse(0))
-
-    // Only return a valid ConsumedTopicState if there is state associated with the topic under the consumer
-    if (partitionOffsets.isDefined || partitionOwners.isDefined) {
-      Some(ConsumedTopicState(consumer,
-                              topic,
-                              numPartitions,
-                              topicPartitionOffsets,
-                              partitionOwners.getOrElse(Map.empty),
-                              partitionOffsets.getOrElse(Map.empty)))
-    } else {
-      None
-    }
-  }*/
-
   override def processActorResponse(response: ActorResponse): Unit = {
     response match {
       case any: Any => log.warning("ksa : processActorResponse : Received unknown message: {}", any.toString)
@@ -352,7 +290,7 @@ class KafkaStateActor(config: KafkaStateActorConfig) extends BaseQueryCommandAct
 
   // Get the latest offsets for the partitions described in the states map,
   // Code based off of the GetOffsetShell tool in kafka.tools, kafka 0.8.2.1
-  private def getPartitionOffsets(topic: String, states: Map[String, String]) : Map[Int,Future[Long]] = {
+  private def getPartitionOffsets(topic: String, states: Map[String, String]) : Future[Map[Int,Long]] = {
     val clientId = "partitionOffsetGetter"
     val targetBrokers : IndexedSeq[Broker] = getBrokers.map(brokerIdentity2Broker)
     val time = -1
@@ -372,19 +310,30 @@ class KafkaStateActor(config: KafkaStateActorConfig) extends BaseQueryCommandAct
 
     // Get the latest offset for each partition
     implicit val ec = longRunningExecutionContext
-    val partitionToOffset = for {
-      (partitionId, optLeader) <- partitionsWithLeaders.sortBy(_._1)
-      partitionOffset: Future[Long] = Future{optLeader match {
-        case Some(leader) =>
-          val consumer = new SimpleConsumer(leader.host, leader.port, 10000, 100000, clientId)
-          val topicAndPartition = TopicAndPartition(topic, partitionId)
-          val request = OffsetRequest(Map(topicAndPartition -> PartitionOffsetRequestInfo(time, nOffsets)))
-          val offsets = consumer.getOffsetsBefore(request).partitionErrorAndOffsets(topicAndPartition).offsets
-          offsets.head
-        case None => throw new Exception("no leader found for this partition")
-      }}
-    } yield (partitionId, partitionOffset)
-    partitionToOffset.toMap
+    val futureMap: Future[Map[Int,Long]] = Future {
+      val optPartitionOffsets: List[(Int,Option[Long])] = for {
+        (partitionId, optLeader) <- partitionsWithLeaders.sortBy(_._1)
+        partitionOffset: Option[Long] = optLeader match {
+            case Some(leader) =>
+              val consumer = new SimpleConsumer(leader.host, leader.port, 10000, 100000, clientId)
+              val topicAndPartition = TopicAndPartition(topic, partitionId)
+              val request = OffsetRequest(Map(topicAndPartition -> PartitionOffsetRequestInfo(time, nOffsets)))
+              val offsets = consumer.getOffsetsBefore(request).partitionErrorAndOffsets(topicAndPartition).offsets
+              offsets.headOption
+            case None => None
+          }
+      } yield (partitionId, partitionOffset)
+      // Remove the Option layer by simply not including those in the map
+      optPartitionOffsets.collect{case (part, Some(offset)) => (part, offset)}.toMap
+    }
+
+    futureMap onFailure {
+      case t => log.error(t, s"[topic=$topic] An error has occurred while getting topic offsets")
+    }
+    futureMap onSuccess {
+      case map => log.info(s"Successfully got the offsets for topic $topic")
+    }
+    futureMap
   }
 
   private[this] def getBrokers : IndexedSeq[BrokerIdentity] = {

@@ -14,7 +14,7 @@ import org.slf4j.LoggerFactory
 import scala.collection.immutable.Queue
 import scala.concurrent.{Await, Future}
 import scala.concurrent.duration.Duration
-import scala.util.Try
+import scala.util.{Try, Success, Failure}
 import scalaz.{NonEmptyList, Validation}
 
 /**
@@ -157,7 +157,7 @@ object ActorModel {
   case class TopicDescription(topic: String,
                               description: (Int,String),
                               partitionState: Option[Map[String, String]],
-                              partitionOffsets: Map[Int, Future[Long]],
+                              partitionOffsets: Future[Map[Int, Long]],
                               config:Option[(Int,String)],
                               deleteSupported: Boolean) extends  QueryResponse
   case class TopicDescriptions(descriptions: IndexedSeq[TopicDescription], lastUpdateMillis: Long) extends QueryResponse
@@ -322,11 +322,12 @@ object ActorModel {
       val tpi : Map[Int,TopicPartitionIdentity] = partMap.map { case (partition, replicas) =>
         val partitionNum = partition.toInt
         // block on the futures that hold the latest produced offset in each partition
-        val partitionOffsets: Map[Int, Long]= td.partitionOffsets.map { case (partition: Int, futOffset: Future[Long]) =>
-          val offset: Try[Long] = Await.ready(futOffset, Duration.Inf).value.get
-          (partition, offset.toOption)
-        }.collect{case (part, Some(offset)) => (part, offset)}
-
+        val partitionOffsets: Map[Int, Long]= Await.ready(td.partitionOffsets, Duration.Inf).value.get match {
+          case Success(offsetMap) =>
+            offsetMap
+          case Failure(e) =>
+            Map.empty
+        }
         (partitionNum,TopicPartitionIdentity.from(partitionNum,
                                                   stateMap.get(partition),
                                                   partitionOffsets.get(partitionNum),
@@ -385,22 +386,20 @@ object ActorModel {
   case class ConsumedTopicState(consumerGroup: String,
                                 topic: String,
                                 numPartitions: Int,
-                                partitionLatestOffsets: Map[Int, Option[Long]],
+                                partitionLatestOffsets: Map[Int, Long],
                                 partitionOwners: Map[Int, String],
                                 partitionOffsets: Map[Int, Long]) {
     lazy val totalLag : Option[Long] = {
       // only defined if every partition has a latest offset
-      val actualOffsets = partitionLatestOffsets.values.collect{case Some(x:Long) => x}
-      if (actualOffsets.size == numPartitions && partitionLatestOffsets.size == numPartitions) {
-          Some(actualOffsets.sum - partitionOffsets.values.sum)
+      if (partitionLatestOffsets.values.size == numPartitions && partitionLatestOffsets.size == numPartitions) {
+          Some(partitionLatestOffsets.values.sum - partitionOffsets.values.sum)
       } else None
     }
-    def topicOffsets(partitionNum: Int) : Option[Long] = partitionLatestOffsets.get(partitionNum).flatten
+    def topicOffsets(partitionNum: Int) : Option[Long] = partitionLatestOffsets.get(partitionNum)
 
     def partitionLag(partitionNum: Int) : Option[Long] = {
-      topicOffsets(partitionNum).flatMap{latestOffset: Long =>
-        partitionOffsets.get(partitionNum).map(latestOffset - _)
-      }
+      topicOffsets(partitionNum).flatMap{topicOffset =>
+        partitionOffsets.get(partitionNum).map(topicOffset - _)}
     }
 
     // Percentage of the partitions that have an owner
@@ -418,11 +417,13 @@ object ActorModel {
       val partitionOffsetsMap = ctd.partitionOffsets.getOrElse(Map.empty)
       val partitionOwnersMap = ctd.partitionOwners.getOrElse(Map.empty)
       // block on the futures that hold the latest produced offset in each partition
-      val topicOffsetsOptMap: Map[Int, Option[Long]]= ctd.topicDescription.map(_.partitionOffsets.map {
-        case (partition: Int, futOffset: Future[Long]) =>
-          val offset: Try[Long] = Await.ready(futOffset, Duration.Inf).value.get
-          (partition, offset.toOption)
-      }).getOrElse(Map.empty)
+      val topicOffsetsOptMap: Map[Int, Long]= ctd.topicDescription.map{td: TopicDescription =>
+        Await.ready(td.partitionOffsets, Duration.Inf).value.get match {
+        case Success(offsetMap: Map[Int,Long]) =>
+          offsetMap
+        case Failure(e) =>
+          Map.empty[Int, Long]
+      }}.getOrElse(Map.empty)
 
       ConsumedTopicState(ctd.consumer, ctd.topic, ctd.numPartitions, topicOffsetsOptMap, partitionOwnersMap, partitionOffsetsMap)
     }

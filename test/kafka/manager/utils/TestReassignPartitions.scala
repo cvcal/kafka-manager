@@ -11,6 +11,8 @@ import kafka.manager.{ClusterConfig, Kafka_0_8_2_0}
 import kafka.manager.utils.zero81._
 import org.apache.zookeeper.data.Stat
 
+import scala.concurrent.Future
+
 /**
  * @author hiral
  */
@@ -47,7 +49,7 @@ class TestReassignPartitions extends CuratorAwareTest {
       val json : String = curator.getData.storingStatIn(stat).forPath(ZkUtils.getTopicPath(topic))
       val configStat = new Stat
       val configJson : String = curator.getData.storingStatIn(configStat).forPath(ZkUtils.getTopicConfigPath(topic))
-      val td: TopicDescription = TopicDescription(topic,(stat.getVersion,json),None,Map.empty,Option((configStat.getVersion,configJson)),false)
+      val td: TopicDescription = TopicDescription(topic,(stat.getVersion,json),None,Future.successful(Map.empty),Option((configStat.getVersion,configJson)),false)
       TopicIdentity.from(brokerList.size,td,None, defaultClusterConfig)
     }
   }
