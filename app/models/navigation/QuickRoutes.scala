@@ -23,6 +23,7 @@ object QuickRoutes {
     "Summary" -> controllers.routes.Application.cluster,
     "Brokers" -> controllers.routes.Application.brokers,
     "Topics" -> controllers.routes.Topic.topics,
+    "Consumers" -> controllers.routes.Consumer.consumers,
     "List" -> controllers.routes.Topic.topics,
     "Create" -> controllers.routes.Topic.createTopic,
     "Preferred Replica Election" -> controllers.routes.PreferredReplicaElection.preferredReplicaElection,
