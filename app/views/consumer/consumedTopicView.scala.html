@@ -4,19 +4,19 @@
 *@
 @import scalaz.{\/}
 @(cluster:String,
-consumer: String,
-topic: String,
-errorOrConsumedTopicState: kafka.manager.ApiError \/ kafka.manager.ActorModel.ConsumedTopicState
+  consumer: String,
+  topic: String,
+  errorOrConsumedTopicState: kafka.manager.ApiError \/ kafka.manager.ActorModel.ConsumedTopicState
 )
 
 @theMenu = {
-@views.html.navigation.clusterMenu(cluster,"Topic Consumption","",models.navigation.Menus.clusterMenus(cluster))
+    @views.html.navigation.clusterMenu(cluster,"Topic Consumption","",models.navigation.Menus.clusterMenus(cluster))
 }
 
 @main(
-"Consumed Topic View",
-menu = theMenu,
-breadcrumbs=views.html.navigation.breadCrumbs(models.navigation.BreadCrumbs.withNamedViewAndCluster("Consumer View",cluster,consumer))) {
+    "Consumed Topic View",
+    menu = theMenu,
+    breadcrumbs=views.html.navigation.breadCrumbs(models.navigation.BreadCrumbs.withNamedViewAndClusterAndConsumer("Consumer View",cluster,consumer,topic))) {
 <div class="col-md-12 un-pad-me">
     <div class="panel panel-default">
         <div class="panel-heading">

@@ -8,11 +8,18 @@
 
 @getTopicCoverage(percentage: Int) = {
     @percentage match {
-        case i if i > 50 && i<=75 => {warning}
-        case i if i <=  50 => {danger}
+        case i if i <=  99 => {danger}
         case i => {}
     }
 }
+
+@ifPartitionNotOwned(owner: Option[String]) = {
+    @owner match {
+    case None => {warning}
+    case Some(a) => {}
+    }
+}
+
 <div class="row">
     <div class="col-md-6">
         <div class="panel panel-default">
@@ -47,7 +54,7 @@
                     <td>@state.topicOffsets(tp).getOrElse(" ")</td>
                     <td>@state.partitionOffsets.get(tp)</td>
                     <td>@state.partitionLag(tp).getOrElse(" ") </td>
-                    <td>@state.partitionOwners.get(tp).getOrElse("None")</td>
+                    <td class="@ifPartitionNotOwned(state.partitionOwners.get(tp))">@state.partitionOwners.get(tp).getOrElse("None")</td>
                 </tr>
                 }
                 </tbody>

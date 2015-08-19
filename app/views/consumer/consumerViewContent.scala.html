@@ -7,8 +7,7 @@
 
 @getTopicCoverage(percentage: Int) = {
     @percentage match {
-        case i if i > 50 && i<=75 => {warning}
-        case i if i <=  50 => {danger}
+        case i if i <=  99 => {danger}
         case i => {}
     }
 }

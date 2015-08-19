@@ -34,6 +34,9 @@ object QuickRoutes {
     "Add Partitions" -> controllers.routes.Topic.addPartitions,
     "Update Config" -> controllers.routes.Topic.addPartitions
   )
+  val consumerRoutes : Map[String, (String, String) => Call] = Map(
+    "Consumer View" -> controllers.routes.Consumer.consumer
+  )
 
   implicit class BaseRoute(s: String) {
     def baseRouteMenuItem : (String, Call) = {
@@ -71,6 +74,15 @@ object QuickRoutes {
     }
     def topicRoute(c: String, t: String): Call = {
       topicRoutes(s)(c,t)
+    }
+  }
+
+  implicit class ConsumerRoute(s: String) {
+    def consumerRouteMenuItem(cluster: String, consumer: String): (String, Call) = {
+      s -> consumerRoutes(s)(cluster,consumer)
+    }
+    def consumerRoute(cluster: String, consumer: String): Call = {
+      consumerRoutes(s)(cluster,consumer)
     }
   }
 }

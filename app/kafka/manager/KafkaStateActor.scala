@@ -52,19 +52,19 @@ class KafkaStateActor(config: KafkaStateActorConfig) extends BaseQueryCommandAct
   private[this] val brokersPathCache = new PathChildrenCache(config.curator,ZkUtils.BrokerIdsPath,true)
 
   private[this] val adminPathCache = new PathChildrenCache(config.curator,ZkUtils.AdminPath,true)
-  
+
   private[this] val deleteTopicsPathCache = new PathChildrenCache(config.curator, ZkUtils.DeleteTopicsPath,true)
 
   // Caches a map of partitions to offsets at a key that is the topic's name.
   private[this] val partitionOffsetsCache: LoadingCache[String, Future[Map[Int,Long]]] = CacheBuilder.newBuilder()
-      .expireAfterWrite(5,TimeUnit.SECONDS) // TODO - update more or less often maybe, or make it configurable
-      .build(
-        new CacheLoader[String,Future[Map[Int,Long]]] {
-          def load(topic: String): Future[Map[Int,Long]] = {
-            loadPartitionOffsets(topic)
-          }
+    .expireAfterWrite(5,TimeUnit.SECONDS) // TODO - update more or less often maybe, or make it configurable
+    .build(
+      new CacheLoader[String,Future[Map[Int,Long]]] {
+        def load(topic: String): Future[Map[Int,Long]] = {
+          loadPartitionOffsets(topic)
         }
-      )
+      }
+    )
 
 
   @volatile
@@ -119,7 +119,7 @@ class KafkaStateActor(config: KafkaStateActorConfig) extends BaseQueryCommandAct
           endPreferredLeaderElection(event.getData)
           endReassignPartition(event.getData)
         case _ =>
-          //do nothing
+        //do nothing
       }
     }
 
@@ -273,7 +273,7 @@ class KafkaStateActor(config: KafkaStateActorConfig) extends BaseQueryCommandAct
       val filteredList: IndexedSeq[String] = data.asScala.filter{
         case (consumer, childData) =>
           if (config.clusterConfig.filterConsumers)
-            // Defining "inactive consumer" as a consumer that is missing one of three children ids/ offsets/ or owners/
+          // Defining "inactive consumer" as a consumer that is missing one of three children ids/ offsets/ or owners/
             childData.getStat.getNumChildren > 2
           else true
       }.keySet.toIndexedSeq
@@ -518,7 +518,7 @@ class KafkaStateActor(config: KafkaStateActorConfig) extends BaseQueryCommandAct
       case Failure(t) =>
         log.error("Failed!",t)
       case Success(_) =>
-        //do nothing
+      //do nothing
     }
   }
 
