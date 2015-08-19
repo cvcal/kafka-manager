@@ -5,6 +5,9 @@
 
 package kafka.manager
 
+import java.util.concurrent.TimeUnit
+
+import com.google.common.cache.{LoadingCache, CacheLoader, CacheBuilder}
 import kafka.api.{PartitionOffsetRequestInfo, OffsetRequest}
 import kafka.consumer.SimpleConsumer
 import kafka.cluster.Broker
@@ -51,6 +54,18 @@ class KafkaStateActor(config: KafkaStateActorConfig) extends BaseQueryCommandAct
   private[this] val adminPathCache = new PathChildrenCache(config.curator,ZkUtils.AdminPath,true)
   
   private[this] val deleteTopicsPathCache = new PathChildrenCache(config.curator, ZkUtils.DeleteTopicsPath,true)
+
+  // Caches a map of partitions to offsets at a key that is the topic's name.
+  private[this] val partitionOffsetsCache: LoadingCache[String, Future[Map[Int,Long]]] = CacheBuilder.newBuilder()
+      .expireAfterWrite(5,TimeUnit.SECONDS) // TODO - update more or less often maybe, or make it configurable
+      .build(
+        new CacheLoader[String,Future[Map[Int,Long]]] {
+          def load(topic: String): Future[Map[Int,Long]] = {
+            loadPartitionOffsets(topic)
+          }
+        }
+      )
+
 
   @volatile
   private[this] var topicsTreeCacheLastUpdateMillis : Long = System.currentTimeMillis()
@@ -200,22 +215,47 @@ class KafkaStateActor(config: KafkaStateActorConfig) extends BaseQueryCommandAct
     super.postStop()
   }
 
-  def getTopicDescription(topic: String) : Option[TopicDescription] = {
+  def getTopicZookeeperData(topic: String): Option[(Int,String)] = {
     val topicPath = "%s/%s".format(ZkUtils.BrokerTopicsPath,topic)
-    val descriptionOption : Option[(Int,String)] =
-      Option(topicsTreeCache.getCurrentData(topicPath)).map( childData => (childData.getStat.getVersion,asString(childData.getData)))
+    Option(topicsTreeCache.getCurrentData(topicPath)).map( childData => (childData.getStat.getVersion,asString(childData.getData)))
+  }
 
+  def getTopicDescription(topic: String) : Option[TopicDescription] = {
     for {
-      description <- descriptionOption
+      description <- getTopicZookeeperData(topic)
       partitionsPath = "%s/%s/partitions".format(ZkUtils.BrokerTopicsPath, topic)
       partitions: Map[String, ChildData] <- Option(topicsTreeCache.getCurrentChildren(partitionsPath)).map(_.asScala.toMap)
       states : Map[String, String] = partitions flatMap { case (part, _) =>
         val statePath = s"$partitionsPath/$part/state"
         Option(topicsTreeCache.getCurrentData(statePath)).map(cd => (part, asString(cd.getData)))
       }
-      partitionOffsets = getPartitionOffsets(topic, states)
+      partitionOffsets = partitionOffsetsCache.get(topic)
       topicConfig = getTopicConfigString(topic)
     } yield TopicDescription(topic, description, Option(states), partitionOffsets, topicConfig, config.deleteSupported)
+  }
+
+  def getPartitionLeaders(topic: String) : Option[List[(Int, Option[Broker])]] = {
+    val partitionsPath = "%s/%s/partitions".format(ZkUtils.BrokerTopicsPath, topic)
+    val partitions: Option[Map[String, ChildData]] = Option(topicsTreeCache.getCurrentChildren(partitionsPath)).map(_.asScala.toMap)
+    val states : Option[Iterable[(String, String)]] =
+      partitions.map[Iterable[(String,String)]]{ partMap: Map[String, ChildData] =>
+        partMap.flatMap { case (part, _) =>
+          val statePath = s"$partitionsPath/$part/state"
+          Option(topicsTreeCache.getCurrentData(statePath)).map(cd => (part, asString(cd.getData)))
+        }
+      }
+    val targetBrokers : IndexedSeq[Broker] = getBrokers.map(brokerIdentity2Broker)
+
+    import org.json4s.jackson.JsonMethods.parse
+    import org.json4s.scalaz.JsonScalaz.field
+    states.map(_.map{case (part, state) =>
+      val partition = part.toInt
+      val descJson = parse(state)
+      val leaderID = field[Int]("leader")(descJson).fold({ e =>
+        log.error(s"[topic=$topic] Failed to get partitions from topic json $state"); 0}, identity)
+      val leader = targetBrokers.find(_.id == leaderID)
+      (partition, leader)
+    }.toList)
   }
 
   private[this] def getTopicConfigString(topic: String) : Option[(Int,String)] = {
@@ -287,51 +327,41 @@ class KafkaStateActor(config: KafkaStateActorConfig) extends BaseQueryCommandAct
     Broker(id.id, id.host, id.port)
   }
 
-
-  // Get the latest offsets for the partitions described in the states map,
+  // Get the latest offsets for the partitions of the topic,
   // Code based off of the GetOffsetShell tool in kafka.tools, kafka 0.8.2.1
-  private def getPartitionOffsets(topic: String, states: Map[String, String]) : Future[Map[Int,Long]] = {
+  private[this] def loadPartitionOffsets(topic: String): Future[Map[Int,Long]] = {
+    // Get partition leader broker information
+    val optPartitionsWithLeaders : Option[List[(Int, Option[Broker])]] = getPartitionLeaders(topic)
+
     val clientId = "partitionOffsetGetter"
-    val targetBrokers : IndexedSeq[Broker] = getBrokers.map(brokerIdentity2Broker)
     val time = -1
     val nOffsets = 1
-
-    // Get partition leader broker information
-    import org.json4s.jackson.JsonMethods.parse
-    import org.json4s.scalaz.JsonScalaz.field
-    val partitionsWithLeaders : List[(Int, Option[Broker])] = for {
-      (part, state) <- states.toList
-      partition = part.toInt
-      descJson = parse(state)
-      leaderID = field[Int]("leader")(descJson).fold({ e =>
-        log.error(s"[topic=$topic] Failed to get partitions from topic json $state"); 0}, identity)
-      leader = targetBrokers.find(_.id == leaderID)
-    } yield (partition, leader)
-
     // Get the latest offset for each partition
     implicit val ec = longRunningExecutionContext
     val futureMap: Future[Map[Int,Long]] = Future {
-      val optPartitionOffsets: List[(Int,Option[Long])] = for {
-        (partitionId, optLeader) <- partitionsWithLeaders.sortBy(_._1)
-        partitionOffset: Option[Long] = optLeader match {
+      optPartitionsWithLeaders.fold{
+        throw new IllegalArgumentException(s"Do not have partitions and their leaders for topic $topic")
+      } { partitionsWithLeaders =>
+        val optPartitionOffsets: List[(Int, Option[Long])] = for {
+          (partitionId, optLeader) <- partitionsWithLeaders.sortBy(_._1)
+          partitionOffset: Option[Long] = optLeader match {
             case Some(leader) =>
               val consumer = new SimpleConsumer(leader.host, leader.port, 10000, 100000, clientId)
               val topicAndPartition = TopicAndPartition(topic, partitionId)
               val request = OffsetRequest(Map(topicAndPartition -> PartitionOffsetRequestInfo(time, nOffsets)))
               val offsets = consumer.getOffsetsBefore(request).partitionErrorAndOffsets(topicAndPartition).offsets
+              consumer.close()
               offsets.headOption
             case None => None
           }
-      } yield (partitionId, partitionOffset)
-      // Remove the Option layer by simply not including those in the map
-      optPartitionOffsets.collect{case (part, Some(offset)) => (part, offset)}.toMap
+        } yield (partitionId, partitionOffset)
+        // Remove the Option layer by simply not including Nones in the map
+        optPartitionOffsets.collect { case (part, Some(offset)) => (part, offset) }.toMap
+      }
     }
 
     futureMap onFailure {
       case t => log.error(t, s"[topic=$topic] An error has occurred while getting topic offsets")
-    }
-    futureMap onSuccess {
-      case map => log.info(s"Successfully got the offsets for topic $topic")
     }
     futureMap
   }
